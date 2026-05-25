@@ -115,35 +115,50 @@ async def verificar_url(page, href, base_url):
     else:
         full_url = base_url.rstrip('/') + '/' + href.lstrip('/')
 
-    try:
-        response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2000)
+    for tentativa in range(2):
+        try:
+            response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(2000)
 
-        status = response.status if response else 0
-        title = await page.title()
+            status = response.status if response else 0
+            title = await page.title()
 
-        # Só marca como erro se o status HTTP for >= 400
-        # Páginas VTEX com conteúdo JS não devem ser julgadas pelo HTML estático
-        is_error = status >= 400
+            is_error = status >= 400
+            if '404' in title or 'não encontrad' in title.lower() or 'page not found' in title.lower():
+                is_error = True
 
-        # Verifica 404 real pelo título da página (VTEX exibe título diferente em 404)
-        if '404' in title or 'não encontrad' in title.lower() or 'page not found' in title.lower():
-            is_error = True
+            # Se deu erro na primeira tentativa, espera 3s e tenta de novo
+            if is_error and tentativa == 0:
+                print(f"    ⚠ Erro na 1ª tentativa ({status}), tentando novamente...")
+                await page.wait_for_timeout(3000)
+                continue
 
-        return {
-            "url": full_url,
-            "status": status,
-            "title": title[:70],
-            "ok": not is_error,
-        }
+            return {
+                "url": full_url,
+                "status": status,
+                "title": title[:70],
+                "ok": not is_error,
+            }
 
-    except Exception as e:
-        return {
-            "url": full_url,
-            "status": "ERR",
-            "title": str(e)[:60],
-            "ok": False,
-        }
+        except Exception as e:
+            if tentativa == 0:
+                print(f"    ⚠ Exceção na 1ª tentativa, tentando novamente...")
+                await page.wait_for_timeout(3000)
+                continue
+            return {
+                "url": full_url,
+                "status": "ERR",
+                "title": str(e)[:60],
+                "ok": False,
+            }
+
+    # Se chegou aqui, as duas tentativas falharam
+    return {
+        "url": full_url,
+        "status": status if 'status' in dir() else "ERR",
+        "title": title[:70] if 'title' in dir() else "Erro desconhecido",
+        "ok": False,
+    }
 
 
 # ─── Verificação do site ──────────────────────────────────────────────────────
