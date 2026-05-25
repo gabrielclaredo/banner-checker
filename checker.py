@@ -27,8 +27,8 @@ SITES = [
 async def coletar_links_banners(page, url):
     """Acessa o site, clica nas setas dos carrosséis e coleta todos os links de banner."""
     print(f"  → Acessando {url}")
-    await page.goto(url, wait_until="networkidle", timeout=60000)
-    await page.wait_for_timeout(3000)
+    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(5000)
 
     # Clica nas setas de todos os carrosséis para carregar todos os slides
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
