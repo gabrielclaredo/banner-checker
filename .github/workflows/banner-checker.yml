@@ -1,0 +1,40 @@
+name: Banner Checker — Bemol
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * *'
+
+jobs:
+  check-banners:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Rodar verificação
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        run: python checker.py
+
+      - name: Salvar relatório como artefato
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-banners-${{ github.run_number }}
+          path: report_banners.html
+          retention-days: 30
