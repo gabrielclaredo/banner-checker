@@ -6,31 +6,24 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from playwright.async_api import async_playwright
 
-# ─── Configuração ───────────────────────────────────────────────────────────
+# ─── Configuração ────────────────────────────────────────────────────────────
 EMAIL_DESTINO = "gablaredox@gmail.com"
 EMAIL_REMETENTE = os.environ.get("EMAIL_USER", "")
 EMAIL_SENHA = os.environ.get("EMAIL_PASS", "")
 
 SITES = [
-    {
-        "nome": "Bemol",
-        "url": "https://www.bemol.com.br",
-    },
-    {
-        "nome": "Bemol Farma",
-        "url": "https://www.bemolfarma.com.br",
-    },
+    {"nome": "Bemol",       "url": "https://www.bemol.com.br"},
+    {"nome": "Bemol Farma", "url": "https://www.bemolfarma.com.br"},
 ]
 
-# ─── Funções ─────────────────────────────────────────────────────────────────
+# ─── Coleta de links ──────────────────────────────────────────────────────────
 
 async def coletar_links_banners(page, url):
-    """Acessa o site, clica nas setas dos carrosséis e coleta todos os links de banner."""
     print(f"  → Acessando {url}")
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(5000)
 
-    # Clica nas setas de todos os carrosséis para carregar todos os slides
+    # Clica nas setas do carrossel principal para carregar todos os slides
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
     print(f"  → {len(right_arrows)} carrosséis encontrados")
 
@@ -38,39 +31,42 @@ async def coletar_links_banners(page, url):
         for _ in range(30):
             try:
                 await arrow.click()
-                await page.wait_for_timeout(250)
+                await page.wait_for_timeout(200)
             except Exception:
                 break
 
-    # Rola até o footer para garantir lazy load
+    # Rola até o footer para lazy load
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     await page.wait_for_timeout(2000)
 
-    # Clica novamente nas setas do footer
+    # Clica nas setas do carrossel do footer
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
     for arrow in right_arrows[-2:]:
         for _ in range(20):
             try:
                 await arrow.click()
-                await page.wait_for_timeout(250)
+                await page.wait_for_timeout(200)
             except Exception:
                 break
 
     await page.wait_for_timeout(1000)
 
-    # Coleta todos os links de banner (imageElementLink)
+    # Coleta links dos carrosséis
     links = await page.evaluate("""
         () => {
             const sections = document.querySelectorAll('[class*="vtex-slider-layout-0-x-sliderTrackContainer"]');
             const result = [];
-            sections.forEach((section, secIdx) => {
+            let carouselIdx = 1;
+            sections.forEach((section) => {
                 const anchors = section.querySelectorAll('[class*="imageElementLink"]');
+                if (anchors.length === 0) return;
                 anchors.forEach(a => {
                     const href = (a.getAttribute('href') || '').split('?')[0].trim();
                     if (href && href !== '/' && href !== '#') {
-                        result.push({ href, section: secIdx });
+                        result.push({ href, section: 'Carrossel ' + carouselIdx });
                     }
                 });
+                carouselIdx++;
             });
             // Remove duplicatas por href
             const seen = new Set();
@@ -82,7 +78,7 @@ async def coletar_links_banners(page, url):
         }
     """)
 
-    # Também pega banners de categoria (fora dos carrosséis)
+    # Coleta banners de categoria (fora dos carrosséis)
     cat_links = await page.evaluate("""
         () => {
             const inCarousel = new Set(
@@ -92,21 +88,17 @@ async def coletar_links_banners(page, url):
             const allBanners = document.querySelectorAll('[class*="imageElementLink"]');
             const result = [];
             const seen = new Set();
+            const blocked = ['facebook','instagram','twitter','x.com','youtube',
+                             'linkedin','apple.com','google.com','siteblindado',
+                             'consumidor.gov','ebit','compreconfie'];
             allBanners.forEach(a => {
                 const href = (a.getAttribute('href') || '').split('?')[0].trim();
-                if (href && href !== '/' && href !== '#' && !inCarousel.has(href) && !seen.has(href)) {
-                    // Filtra links de redes sociais, app stores, etc
-                    if (!href.includes('facebook') && !href.includes('instagram') &&
-                        !href.includes('twitter') && !href.includes('x.com') &&
-                        !href.includes('youtube') &&
-                        !href.includes('linkedin') && !href.includes('apple.com') &&
-                        !href.includes('google.com') && !href.includes('siteblindado') &&
-                        !href.includes('consumidor.gov') && !href.includes('ebit') &&
-                        !href.includes('compreconfie') && href !== '#') {
-                        seen.add(href);
-                        result.push({ href, section: 'categoria' });
-                    }
-                }
+                if (!href || href === '/' || href === '#') return;
+                if (inCarousel.has(href)) return;
+                if (seen.has(href)) return;
+                if (blocked.some(b => href.includes(b))) return;
+                seen.add(href);
+                result.push({ href, section: 'Categoria' });
             });
             return result;
         }
@@ -115,9 +107,9 @@ async def coletar_links_banners(page, url):
     return links + cat_links
 
 
+# ─── Verificação de URL ───────────────────────────────────────────────────────
+
 async def verificar_url(page, href, base_url):
-    """Navega para a URL e verifica se está funcionando."""
-    # Monta URL completa
     if href.startswith('http'):
         full_url = href
     else:
@@ -125,25 +117,24 @@ async def verificar_url(page, href, base_url):
 
     try:
         response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2000)
 
         status = response.status if response else 0
         title = await page.title()
-        current_url = page.url
 
-        is_404 = (
-            status == 404 or
-            "não encontramos" in (await page.content()).lower() or
-            "página não encontrada" in (await page.content()).lower() or
-            "not found" in title.lower()
-        )
+        # Só marca como erro se o status HTTP for >= 400
+        # Páginas VTEX com conteúdo JS não devem ser julgadas pelo HTML estático
+        is_error = status >= 400
+
+        # Verifica 404 real pelo título da página (VTEX exibe título diferente em 404)
+        if '404' in title or 'não encontrad' in title.lower() or 'page not found' in title.lower():
+            is_error = True
 
         return {
             "url": full_url,
             "status": status,
             "title": title[:70],
-            "is_404": is_404,
-            "ok": not is_404 and status < 400,
+            "ok": not is_error,
         }
 
     except Exception as e:
@@ -151,13 +142,13 @@ async def verificar_url(page, href, base_url):
             "url": full_url,
             "status": "ERR",
             "title": str(e)[:60],
-            "is_404": False,
             "ok": False,
         }
 
 
+# ─── Verificação do site ──────────────────────────────────────────────────────
+
 async def verificar_site(browser, site):
-    """Verifica todos os banners de um site."""
     print(f"\n{'='*50}")
     print(f"Verificando: {site['nome']} ({site['url']})")
 
@@ -167,44 +158,39 @@ async def verificar_site(browser, site):
     )
     page = await context.new_page()
 
-    # Coleta links
     links = await coletar_links_banners(page, site['url'])
     print(f"  → {len(links)} banners encontrados")
 
-    # Verifica cada link
     resultados = []
     for item in links:
-        print(f"  → Verificando: {item['href'][:60]}")
+        print(f"  → Verificando: {item['href'][:70]}")
         resultado = await verificar_url(page, item['href'], site['url'])
         resultado['section'] = item['section']
         resultados.append(resultado)
-        # Pequena pausa entre requisições
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(300)
 
     await context.close()
     return resultados
 
 
+# ─── Geração do relatório HTML ────────────────────────────────────────────────
+
 def gerar_html_report(todos_resultados, data_hora):
-    """Gera o HTML do relatório de e-mail."""
 
     def secao_badge(sec):
-        if sec == 'categoria':
+        if sec == 'Categoria':
             return '<span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px">Categoria</span>'
-        elif sec == 0:
-            return '<span style="background:#f3e5f5;color:#6a1b9a;padding:2px 8px;border-radius:10px;font-size:11px">Banner fixo</span>'
         else:
-            return f'<span style="background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px">Carrossel {sec}</span>'
+            return f'<span style="background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px">{sec}</span>'
 
-    total_ok = sum(1 for _, res in todos_resultados for r in res if r['ok'])
-    total_erro = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
-    total = total_ok + total_erro
+    total_ok    = sum(1 for _, res in todos_resultados for r in res if r['ok'])
+    total_erro  = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
+    total       = total_ok + total_erro
 
-    status_cor = "#2e7d32" if total_erro == 0 else "#c62828"
+    status_cor   = "#2e7d32" if total_erro == 0 else "#c62828"
     status_texto = "✅ Tudo OK!" if total_erro == 0 else f"⚠️ {total_erro} problema(s) encontrado(s)"
 
-    html = f"""
-<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
 <body style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#333">
@@ -235,7 +221,7 @@ def gerar_html_report(todos_resultados, data_hora):
 """
 
     for site_nome, resultados in todos_resultados:
-        erros = [r for r in resultados if not r['ok']]
+        erros    = [r for r in resultados if not r['ok']]
         ok_count = len(resultados) - len(erros)
 
         html += f"""
@@ -251,15 +237,15 @@ def gerar_html_report(todos_resultados, data_hora):
     </tr>
 """
         for r in resultados:
-            bg = "#ffffff" if r['ok'] else "#fff3f3"
-            status_icon = "✅" if r['ok'] else "❌"
-            status_label = str(r['status']) if r['ok'] else f"❌ {r['status']}"
+            bg           = "#ffffff" if r['ok'] else "#fff3f3"
+            status_icon  = "✅" if r['ok'] else "❌"
+            status_label = str(r['status'])
             html += f"""
     <tr style="background:{bg}">
       <td style="padding:7px 10px;border:1px solid #ddd;white-space:nowrap">{status_icon} {status_label}</td>
       <td style="padding:7px 10px;border:1px solid #ddd">{r['title']}</td>
       <td style="padding:7px 10px;border:1px solid #ddd;font-family:monospace;font-size:11px">
-        <a href="{r['url']}" style="color:#003087">{r['url'][:70]}</a>
+        <a href="{r['url']}" style="color:#003087">{r['url'][:80]}</a>
       </td>
       <td style="padding:7px 10px;border:1px solid #ddd">{secao_badge(r['section'])}</td>
     </tr>"""
@@ -276,14 +262,14 @@ def gerar_html_report(todos_resultados, data_hora):
     return html
 
 
-def enviar_email(html, data_hora, total_erros):
-    """Envia o relatório por e-mail."""
-    assunto = f"{'⚠️ ATENÇÃO' if total_erros > 0 else '✅ OK'} — Report Banners Bemol {data_hora}"
+# ─── Envio de e-mail ──────────────────────────────────────────────────────────
 
+def enviar_email(html, data_hora, total_erros):
+    assunto = f"{'⚠️ ATENÇÃO' if total_erros > 0 else '✅ OK'} — Report Banners Bemol {data_hora}"
     msg = MIMEMultipart("alternative")
     msg["Subject"] = assunto
-    msg["From"] = EMAIL_REMETENTE
-    msg["To"] = EMAIL_DESTINO
+    msg["From"]    = EMAIL_REMETENTE
+    msg["To"]      = EMAIL_DESTINO
     msg.attach(MIMEText(html, "html"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -293,6 +279,8 @@ def enviar_email(html, data_hora, total_erros):
     print(f"\n✅ E-mail enviado para {EMAIL_DESTINO}")
 
 
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
 async def main():
     data_hora = datetime.now().strftime("%d/%m/%Y às %H:%M")
     print(f"\n🔍 Iniciando verificação — {data_hora}")
@@ -301,27 +289,22 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-
         for site in SITES:
             resultados = await verificar_site(browser, site)
             todos_resultados.append((site['nome'], resultados))
-
         await browser.close()
 
-    # Gera relatório
-    html = gerar_html_report(todos_resultados, data_hora)
+    html        = gerar_html_report(todos_resultados, data_hora)
     total_erros = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
 
-    # Salva localmente também
     with open("report_banners.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("📄 Relatório salvo em report_banners.html")
 
-    # Envia e-mail
     if EMAIL_REMETENTE and EMAIL_SENHA:
         enviar_email(html, data_hora, total_erros)
     else:
-        print("⚠️  Variáveis EMAIL_USER e EMAIL_PASS não configuradas — e-mail não enviado")
+        print("⚠️  Variáveis EMAIL_USER e EMAIL_PASS não configuradas")
 
     print(f"\n{'='*50}")
     print(f"Total com problema: {total_erros}")
