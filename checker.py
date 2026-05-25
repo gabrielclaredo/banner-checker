@@ -97,7 +97,8 @@ async def coletar_links_banners(page, url):
                 if (href && href !== '/' && href !== '#' && !inCarousel.has(href) && !seen.has(href)) {
                     // Filtra links de redes sociais, app stores, etc
                     if (!href.includes('facebook') && !href.includes('instagram') &&
-                        !href.includes('twitter') && !href.includes('youtube') &&
+                        !href.includes('twitter') && !href.includes('x.com') &&
+                        !href.includes('youtube') &&
                         !href.includes('linkedin') && !href.includes('apple.com') &&
                         !href.includes('google.com') && !href.includes('siteblindado') &&
                         !href.includes('consumidor.gov') && !href.includes('ebit') &&
