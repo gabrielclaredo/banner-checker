@@ -7,7 +7,7 @@ from email.mime.text import MIMEText
 from playwright.async_api import async_playwright
 
 # ─── Configuração ───────────────────────────────────────────────────────────
-EMAIL_DESTINO = "gabrielclaredo@gmail.com"
+EMAIL_DESTINO = "gablaredox@gmail.com"
 EMAIL_REMETENTE = os.environ.get("EMAIL_USER", "")
 EMAIL_SENHA = os.environ.get("EMAIL_PASS", "")
 
