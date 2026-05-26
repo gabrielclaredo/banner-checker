@@ -3,7 +3,7 @@ name: Banner Checker — Bemol
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 12 * * *'
 
 jobs:
   check-banners:
@@ -38,3 +38,6 @@ jobs:
           name: report-banners-${{ github.run_number }}
           path: report_banners.html
           retention-days: 30
+
+      - name: Manter workflow ativo
+        run: echo "Workflow executado em $(date)"
