@@ -115,6 +115,21 @@ async def verificar_url(page, href, base_url):
     else:
         full_url = base_url.rstrip('/') + '/' + href.lstrip('/')
 
+    # Domínios externos conhecidos que requerem autenticação ou redirecionam para app
+    # Não é possível verificar automaticamente — marcamos como OK por padrão
+    DOMINIOS_EXTERNOS_OK = [
+        'app.contabemol.com.br',
+        'emprestimocgi.bemol.com.br',
+        'bit.ly',
+    ]
+    if any(d in full_url for d in DOMINIOS_EXTERNOS_OK):
+        return {
+            "url": full_url,
+            "status": "OK*",
+            "title": "Link externo (verificação manual)",
+            "ok": True,
+        }
+
     for tentativa in range(2):
         try:
             response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
