@@ -3,7 +3,8 @@ name: Banner Checker — Bemol
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * 1-5'   # 8h00 (Manaus, UTC-4), seg-sex
+    - cron: '30 20 * * 1-5'  # 16h30 (Manaus, UTC-4), seg-sex
 
 jobs:
   check-banners:
@@ -21,14 +22,13 @@ jobs:
 
       - name: Instalar dependências
         run: |
-          pip install playwright
+          pip install playwright sendgrid
           playwright install chromium
           playwright install-deps chromium
 
       - name: Rodar verificação
         env:
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
         run: python checker.py
 
       - name: Salvar relatório como artefato
