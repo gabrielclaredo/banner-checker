@@ -1,12 +1,13 @@
 import asyncio
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from playwright.async_api import async_playwright
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = "gabriellaredo@bemol.com.br"
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -311,7 +312,7 @@ def enviar_email(html, data_hora, total_erros):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def main():
-    data_hora = datetime.now().strftime("%d/%m/%Y às %H:%M")
+    data_hora = datetime.now(ZoneInfo("America/Manaus")).strftime("%d/%m/%Y às %H:%M")
     print(f"\n🔍 Iniciando verificação — {data_hora}")
 
     todos_resultados = []
