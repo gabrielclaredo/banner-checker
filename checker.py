@@ -1,15 +1,14 @@
 import asyncio
-import smtplib
 import os
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 from playwright.async_api import async_playwright
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO = "gablaredox@gmail.com"
-EMAIL_REMETENTE = os.environ.get("EMAIL_USER", "")
-EMAIL_SENHA = os.environ.get("EMAIL_PASS", "")
+EMAIL_DESTINO    = "gabriellaredo@bemol.com.br"
+EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
 SITES = [
     {"nome": "Bemol",       "url": "https://www.bemol.com.br"},
@@ -292,21 +291,21 @@ def gerar_html_report(todos_resultados, data_hora):
     return html
 
 
-# ─── Envio de e-mail ──────────────────────────────────────────────────────────
+# ─── Envio de e-mail via SendGrid ─────────────────────────────────────────────
 
 def enviar_email(html, data_hora, total_erros):
     assunto = f"{'⚠️ ATENÇÃO' if total_erros > 0 else '✅ OK'} — Report Banners Bemol {data_hora}"
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = assunto
-    msg["From"]    = EMAIL_REMETENTE
-    msg["To"]      = EMAIL_DESTINO
-    msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(EMAIL_REMETENTE, EMAIL_SENHA)
-        server.sendmail(EMAIL_REMETENTE, EMAIL_DESTINO, msg.as_string())
+    message = Mail(
+        from_email=EMAIL_REMETENTE,
+        to_emails=EMAIL_DESTINO,
+        subject=assunto,
+        html_content=html,
+    )
 
-    print(f"\n✅ E-mail enviado para {EMAIL_DESTINO}")
+    sg = SendGridAPIClient(SENDGRID_API_KEY)
+    response = sg.send(message)
+    print(f"\n✅ E-mail enviado para {EMAIL_DESTINO} (status {response.status_code})")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -331,10 +330,10 @@ async def main():
         f.write(html)
     print("📄 Relatório salvo em report_banners.html")
 
-    if EMAIL_REMETENTE and EMAIL_SENHA:
+    if SENDGRID_API_KEY:
         enviar_email(html, data_hora, total_erros)
     else:
-        print("⚠️  Variáveis EMAIL_USER e EMAIL_PASS não configuradas")
+        print("⚠️  Variável SENDGRID_API_KEY não configurada")
 
     print(f"\n{'='*50}")
     print(f"Total com problema: {total_erros}")
