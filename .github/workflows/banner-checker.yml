@@ -2,9 +2,6 @@ name: Banner Checker — Bemol
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 12 * * 1-5'   # 8h00 (Manaus, UTC-4), seg-sex
-    - cron: '30 20 * * 1-5'  # 16h30 (Manaus, UTC-4), seg-sex
 
 jobs:
   check-banners:
