@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import Mail, TrackingSettings, ClickTracking
 from playwright.async_api import async_playwright
 
 # ─── Configuração ────────────────────────────────────────────────────────────
@@ -327,6 +327,11 @@ def enviar_email(html, data_hora, total_erros):
         to_emails=EMAIL_DESTINO,
         subject=assunto,
         html_content=html,
+    )
+
+    # Desativa rastreamento de cliques para não quebrar URLs com caracteres especiais
+    message.tracking_settings = TrackingSettings(
+        click_tracking=ClickTracking(enable=False, enable_text=False)
     )
 
     sg = SendGridAPIClient(SENDGRID_API_KEY)
