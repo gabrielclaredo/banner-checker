@@ -7,7 +7,7 @@ from sendgrid.helpers.mail import Mail
 from playwright.async_api import async_playwright
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -16,12 +16,17 @@ SITES = [
     {"nome": "Bemol Farma", "url": "https://www.bemolfarma.com.br"},
 ]
 
+# Limita verificações paralelas para não sobrecarregar os servidores
+SEMAFORO = asyncio.Semaphore(3)
+
 # ─── Coleta de links ──────────────────────────────────────────────────────────
 
 async def coletar_links_banners(page, url):
     print(f"  → Acessando {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(5000)
+
+    # networkidle garante que o JS da VTEX terminou de carregar
+    await page.goto(url, wait_until="networkidle", timeout=60000)
+    await page.wait_for_timeout(3000)
 
     # Clica nas setas do carrossel principal para carregar todos os slides
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
@@ -35,11 +40,11 @@ async def coletar_links_banners(page, url):
             except Exception:
                 break
 
-    # Rola até o footer para lazy load
+    # Rola até o footer para acionar lazy load
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     await page.wait_for_timeout(2000)
 
-    # Clica nas setas do carrossel do footer
+    # Clica nas setas dos carrosséis do footer
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
     for arrow in right_arrows[-2:]:
         for _ in range(20):
@@ -68,7 +73,6 @@ async def coletar_links_banners(page, url):
                 });
                 carouselIdx++;
             });
-            // Remove duplicatas por href
             const seen = new Set();
             return result.filter(item => {
                 if (seen.has(item.href)) return false;
@@ -104,19 +108,24 @@ async def coletar_links_banners(page, url):
         }
     """)
 
-    return links + cat_links
+    todos = links + cat_links
+
+    # Alerta se nenhum banner foi encontrado — provavelmente os seletores quebraram
+    if len(todos) == 0:
+        print(f"  ⚠ ATENÇÃO: nenhum banner encontrado em {url}. Verificar seletores CSS.")
+
+    return todos
 
 
 # ─── Verificação de URL ───────────────────────────────────────────────────────
 
-async def verificar_url(page, href, base_url):
+async def verificar_url(browser, href, base_url):
+    """Cada URL abre seu próprio contexto para evitar estado sujo entre páginas."""
     if href.startswith('http'):
         full_url = href
     else:
         full_url = base_url.rstrip('/') + '/' + href.lstrip('/')
 
-    # Domínios externos conhecidos que requerem autenticação ou redirecionam para app
-    # Não é possível verificar automaticamente — marcamos como OK por padrão
     DOMINIOS_EXTERNOS_OK = [
         'app.contabemol.com.br',
         'emprestimocgi.bemol.com.br',
@@ -130,77 +139,86 @@ async def verificar_url(page, href, base_url):
             "ok": True,
         }
 
-    for tentativa in range(2):
+    async with SEMAFORO:
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        )
+        page = await context.new_page()
+
+        # Variáveis inicializadas antes do loop para evitar NameError no fallback
+        status = "ERR"
+        title  = "Erro desconhecido"
+
         try:
-            response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            for tentativa in range(2):
+                try:
+                    response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(2000)
 
-            status = response.status if response else 0
-            title = await page.title()
+                    status = response.status if response else 0
+                    title  = await page.title()
 
-            is_error = status >= 400
-            if '404' in title or 'não encontrad' in title.lower() or 'page not found' in title.lower():
-                is_error = True
+                    is_error = status >= 400
+                    if '404' in title or 'não encontrad' in title.lower() or 'page not found' in title.lower():
+                        is_error = True
 
-            # Se deu erro na primeira tentativa, espera 3s e tenta de novo
-            if is_error and tentativa == 0:
-                print(f"    ⚠ Erro na 1ª tentativa ({status}), tentando novamente...")
-                await page.wait_for_timeout(3000)
-                continue
+                    if is_error and tentativa == 0:
+                        print(f"    ⚠ Erro na 1ª tentativa ({status}), tentando novamente...")
+                        await page.wait_for_timeout(3000)
+                        continue
 
+                    return {
+                        "url":    full_url,
+                        "status": status,
+                        "title":  title[:70],
+                        "ok":     not is_error,
+                    }
+
+                except Exception as e:
+                    title = str(e)[:60]
+                    if tentativa == 0:
+                        print(f"    ⚠ Exceção na 1ª tentativa, tentando novamente...")
+                        await page.wait_for_timeout(3000)
+                        continue
+
+            # Ambas as tentativas falharam
             return {
-                "url": full_url,
+                "url":    full_url,
                 "status": status,
-                "title": title[:70],
-                "ok": not is_error,
+                "title":  title[:70],
+                "ok":     False,
             }
 
-        except Exception as e:
-            if tentativa == 0:
-                print(f"    ⚠ Exceção na 1ª tentativa, tentando novamente...")
-                await page.wait_for_timeout(3000)
-                continue
-            return {
-                "url": full_url,
-                "status": "ERR",
-                "title": str(e)[:60],
-                "ok": False,
-            }
-
-    # Se chegou aqui, as duas tentativas falharam
-    return {
-        "url": full_url,
-        "status": status if 'status' in dir() else "ERR",
-        "title": title[:70] if 'title' in dir() else "Erro desconhecido",
-        "ok": False,
-    }
+        finally:
+            await context.close()
 
 
-# ─── Verificação do site ──────────────────────────────────────────────────────
+# ─── Verificação do site (paralela) ──────────────────────────────────────────
 
 async def verificar_site(browser, site):
     print(f"\n{'='*50}")
     print(f"Verificando: {site['nome']} ({site['url']})")
 
+    # Contexto exclusivo para coleta de banners
     context = await browser.new_context(
         viewport={"width": 1440, "height": 900},
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
     )
     page = await context.new_page()
-
     links = await coletar_links_banners(page, site['url'])
-    print(f"  → {len(links)} banners encontrados")
-
-    resultados = []
-    for item in links:
-        print(f"  → Verificando: {item['href'][:70]}")
-        resultado = await verificar_url(page, item['href'], site['url'])
-        resultado['section'] = item['section']
-        resultados.append(resultado)
-        await page.wait_for_timeout(300)
-
     await context.close()
-    return resultados
+
+    print(f"  → {len(links)} banners encontrados — verificando em paralelo...")
+
+    async def verificar_com_log(item):
+        print(f"  → Verificando: {item['href'][:70]}")
+        resultado = await verificar_url(browser, item['href'], site['url'])
+        resultado['section'] = item['section']
+        return resultado
+
+    resultados = await asyncio.gather(*[verificar_com_log(item) for item in links])
+    return list(resultados)
 
 
 # ─── Geração do relatório HTML ────────────────────────────────────────────────
@@ -210,12 +228,11 @@ def gerar_html_report(todos_resultados, data_hora):
     def secao_badge(sec):
         if sec == 'Categoria':
             return '<span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px">Categoria</span>'
-        else:
-            return f'<span style="background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px">{sec}</span>'
+        return f'<span style="background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px">{sec}</span>'
 
-    total_ok    = sum(1 for _, res in todos_resultados for r in res if r['ok'])
-    total_erro  = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
-    total       = total_ok + total_erro
+    total_ok   = sum(1 for _, res in todos_resultados for r in res if r['ok'])
+    total_erro = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
+    total      = total_ok + total_erro
 
     status_cor   = "#2e7d32" if total_erro == 0 else "#c62828"
     status_texto = "✅ Tudo OK!" if total_erro == 0 else f"⚠️ {total_erro} problema(s) encontrado(s)"
