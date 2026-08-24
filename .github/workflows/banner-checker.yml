@@ -17,9 +17,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar dependências
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache Playwright (Chromium)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-1.49.0
+
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar Chromium e dependências do sistema
         run: |
-          pip install playwright sendgrid
           playwright install chromium
           playwright install-deps chromium
 
@@ -35,6 +51,3 @@ jobs:
           name: report-banners-${{ github.run_number }}
           path: report_banners.html
           retention-days: 30
-
-      - name: Manter workflow ativo
-        run: echo "Workflow executado em $(date)"
