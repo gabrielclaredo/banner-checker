@@ -24,9 +24,17 @@ SEMAFORO = asyncio.Semaphore(3)
 async def coletar_links_banners(page, url):
     print(f"  → Acessando {url}")
 
-    # networkidle garante que o JS da VTEX terminou de carregar
-    await page.goto(url, wait_until="networkidle", timeout=60000)
-    await page.wait_for_timeout(3000)
+    # domcontentloaded + scroll progressivo: bemol.com.br nunca atinge networkidle
+    # pois mantém requisições contínuas de analytics/chat/pixels
+    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(4000)
+
+    # Scroll progressivo para acionar lazy load antes de coletar os links
+    for pct in [25, 50, 75, 100]:
+        await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {pct} / 100)")
+        await page.wait_for_timeout(1000)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(1000)
 
     # Clica nas setas do carrossel principal para carregar todos os slides
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
