@@ -19,6 +19,15 @@ SITES = [
 
 SEMAFORO = asyncio.Semaphore(3)
 
+URLS_IGNORADAS = [
+    'app.contabemol.com.br',
+    'emprestimocgi.bemol.com.br',
+    'bit.ly',
+    'bemolfarma.com.br/super/super%20cimed',
+    'bemolfarma.com.br/super/super cimed',
+    'bemolfarma.com.br/super/super_cimed',
+]
+
 # ─── Coleta de links ──────────────────────────────────────────────────────────
 
 async def coletar_links_banners(page, url):
@@ -124,18 +133,13 @@ async def verificar_url(browser, href, base_url):
     else:
         full_url = base_url.rstrip('/') + '/' + href.lstrip('/')
 
-    full_url = unquote(full_url)
+    full_url_decoded = unquote(full_url)
 
-    DOMINIOS_EXTERNOS_OK = [
-        'app.contabemol.com.br',
-        'emprestimocgi.bemol.com.br',
-        'bit.ly',
-    ]
-    if any(d in full_url for d in DOMINIOS_EXTERNOS_OK):
+    if any(d in full_url for d in URLS_IGNORADAS) or any(d in full_url_decoded for d in URLS_IGNORADAS):
         return {
             "url": full_url,
             "status": "OK*",
-            "title": "Link externo (verificação manual)",
+            "title": "Link ignorado (verificação manual)",
             "ok": True,
         }
 
@@ -152,7 +156,7 @@ async def verificar_url(browser, href, base_url):
         try:
             for tentativa in range(2):
                 try:
-                    response = await page.goto(full_url, wait_until="domcontentloaded", timeout=20000)
+                    response = await page.goto(full_url_decoded, wait_until="domcontentloaded", timeout=20000)
                     await page.wait_for_timeout(2000)
 
                     status = response.status if response else 0
@@ -222,43 +226,60 @@ async def verificar_site(browser, site):
 
 def gerar_html_report(todos_resultados, data_hora):
 
-    def secao_badge(sec):
-        if sec == 'Categoria':
-            return '<span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px">Categoria</span>'
-        return f'<span style="background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px">{sec}</span>'
-
     total_ok   = sum(1 for _, res in todos_resultados for r in res if r['ok'])
     total_erro = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
     total      = total_ok + total_erro
 
+    def secao_badge(sec):
+        if sec == 'Categoria':
+            return '<span style="background:#EFF6FF;color:#1D4ED8;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;font-family:Montserrat,sans-serif">Categoria</span>'
+        return f'<span style="background:#F0FDF4;color:#15803D;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;font-family:Montserrat,sans-serif">{sec}</span>'
+
+    def status_badge(status, ok):
+        if ok:
+            return f'<span style="background:#F0FDF4;color:#15803D;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">✓ {status}</span>'
+        return f'<span style="background:#FEF2F2;color:#DC2626;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">✕ {status}</span>'
+
     html = f"""<!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#333">
+<head>
+  <meta charset="UTF-8">
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body style="font-family:Montserrat,sans-serif;background:#F8FAFC;margin:0;padding:24px;color:#1E293B">
 
-  <div style="background:#003087;color:white;padding:20px 24px;border-radius:8px 8px 0 0">
-    <h1 style="margin:0;font-size:20px">📊 Report de Banners — Bemol</h1>
-    <p style="margin:6px 0 0;opacity:0.8;font-size:13px">{data_hora}</p>
-  </div>
+  <div style="max-width:900px;margin:0 auto">
 
-  <div style="background:#c62828;color:white;padding:14px 24px;font-size:16px;font-weight:bold">
-    ⚠️ {total_erro} problema(s) encontrado(s) &nbsp;·&nbsp; {total_ok}/{total} banners OK
-  </div>
+    <!-- Header -->
+    <div style="background:#007EFF;border-radius:12px 12px 0 0;padding:24px 28px;display:flex;align-items:center;gap:12px">
+      <div>
+        <h1 style="margin:0;font-size:18px;font-weight:700;color:white;letter-spacing:-0.3px">📋 Report de Banners — Bemol</h1>
+        <p style="margin:4px 0 0;font-size:12px;color:rgba(255,255,255,0.75);font-weight:500">{data_hora}</p>
+      </div>
+    </div>
 
-  <div style="display:flex;gap:12px;padding:16px 0">
-    <div style="flex:1;background:#e8f5e9;border-radius:8px;padding:16px;text-align:center">
-      <div style="font-size:28px;font-weight:bold;color:#2e7d32">{total_ok}</div>
-      <div style="color:#555;font-size:13px">OK</div>
+    <!-- Banner de status -->
+    <div style="background:#FEF2F2;border:1px solid #FECACA;border-top:none;padding:14px 28px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:16px">⚠️</span>
+      <span style="font-size:14px;font-weight:600;color:#DC2626">{total_erro} problema(s) encontrado(s)</span>
+      <span style="margin-left:auto;font-size:13px;color:#64748B;font-weight:500">{total_ok}/{total} banners OK</span>
     </div>
-    <div style="flex:1;background:#ffebee;border-radius:8px;padding:16px;text-align:center">
-      <div style="font-size:28px;font-weight:bold;color:#c62828">{total_erro}</div>
-      <div style="color:#555;font-size:13px">Com problema</div>
+
+    <!-- Cards de resumo -->
+    <div style="display:flex;gap:12px;margin:16px 0">
+      <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+        <div style="font-size:32px;font-weight:700;color:#15803D">{total_ok}</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">OK</div>
+      </div>
+      <div style="flex:1;background:white;border:1px solid #FECACA;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+        <div style="font-size:32px;font-weight:700;color:#DC2626">{total_erro}</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Com problema</div>
+      </div>
+      <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+        <div style="font-size:32px;font-weight:700;color:#1E293B">{total}</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Total verificado</div>
+      </div>
     </div>
-    <div style="flex:1;background:#e3f2fd;border-radius:8px;padding:16px;text-align:center">
-      <div style="font-size:28px;font-weight:bold;color:#1565c0">{total}</div>
-      <div style="color:#555;font-size:13px">Total verificado</div>
-    </div>
-  </div>
 """
 
     for site_nome, resultados in todos_resultados:
@@ -267,34 +288,39 @@ def gerar_html_report(todos_resultados, data_hora):
             continue
 
         html += f"""
-  <h2 style="margin:24px 0 8px;font-size:16px;border-bottom:2px solid #003087;padding-bottom:6px">
-    {site_nome} — {len(erros)} banner(s) com problema
-  </h2>
-  <table style="width:100%;border-collapse:collapse;font-size:13px">
-    <tr style="background:#f5f5f5">
-      <th style="padding:8px 10px;text-align:left;border:1px solid #ddd">Status</th>
-      <th style="padding:8px 10px;text-align:left;border:1px solid #ddd">Título</th>
-      <th style="padding:8px 10px;text-align:left;border:1px solid #ddd">URL</th>
-      <th style="padding:8px 10px;text-align:left;border:1px solid #ddd">Seção</th>
-    </tr>
+    <!-- Seção {site_nome} -->
+    <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+      <div style="padding:14px 20px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:14px;font-weight:700;color:#1E293B">{site_nome}</span>
+        <span style="font-size:12px;font-weight:600;color:#DC2626;background:#FEF2F2;padding:3px 10px;border-radius:20px">{len(erros)} banner(s) com problema</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#F8FAFC">
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Status</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Título</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">URL</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Seção</th>
+        </tr>
 """
         for r in erros:
             html += f"""
-    <tr style="background:#fff3f3">
-      <td style="padding:7px 10px;border:1px solid #ddd;white-space:nowrap">❌ {r['status']}</td>
-      <td style="padding:7px 10px;border:1px solid #ddd">{r['title']}</td>
-      <td style="padding:7px 10px;border:1px solid #ddd;font-family:monospace;font-size:11px">
-        <a href="{r['url']}" style="color:#003087">{r['url'][:80]}</a>
-      </td>
-      <td style="padding:7px 10px;border:1px solid #ddd">{secao_badge(r['section'])}</td>
-    </tr>"""
+        <tr style="border-bottom:1px solid #F8FAFC">
+          <td style="padding:12px 16px;white-space:nowrap">{status_badge(r['status'], r['ok'])}</td>
+          <td style="padding:12px 16px;color:#1E293B;font-weight:500;font-size:13px">{r['title']}</td>
+          <td style="padding:12px 16px;font-family:monospace;font-size:11px">
+            <a href="{r['url']}" style="color:#007EFF;text-decoration:none">{r['url'][:80]}</a>
+          </td>
+          <td style="padding:12px 16px">{secao_badge(r['section'])}</td>
+        </tr>"""
 
-        html += "\n  </table>"
+        html += "\n      </table>\n    </div>"
 
     html += """
-  <p style="margin-top:24px;color:#999;font-size:11px;text-align:center">
-    Gerado automaticamente · Bemol Banner Checker
-  </p>
+    <p style="margin-top:20px;color:#94A3B8;font-size:11px;text-align:center;font-weight:500">
+      Gerado automaticamente · Bemol Banner Checker
+    </p>
+
+  </div>
 </body>
 </html>"""
 
