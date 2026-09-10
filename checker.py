@@ -2,6 +2,7 @@ import asyncio
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from urllib.parse import unquote
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, TrackingSettings, ClickTracking
 from playwright.async_api import async_playwright
@@ -16,7 +17,6 @@ SITES = [
     {"nome": "Bemol Farma", "url": "https://www.bemolfarma.com.br"},
 ]
 
-# Limita verificações paralelas para não sobrecarregar os servidores
 SEMAFORO = asyncio.Semaphore(3)
 
 # ─── Coleta de links ──────────────────────────────────────────────────────────
@@ -24,19 +24,15 @@ SEMAFORO = asyncio.Semaphore(3)
 async def coletar_links_banners(page, url):
     print(f"  → Acessando {url}")
 
-    # domcontentloaded + scroll progressivo: bemol.com.br nunca atinge networkidle
-    # pois mantém requisições contínuas de analytics/chat/pixels
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
     await page.wait_for_timeout(4000)
 
-    # Scroll progressivo para acionar lazy load antes de coletar os links
     for pct in [25, 50, 75, 100]:
         await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {pct} / 100)")
         await page.wait_for_timeout(1000)
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(1000)
 
-    # Clica nas setas do carrossel principal para carregar todos os slides
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
     print(f"  → {len(right_arrows)} carrosséis encontrados")
 
@@ -48,11 +44,9 @@ async def coletar_links_banners(page, url):
             except Exception:
                 break
 
-    # Rola até o footer para acionar lazy load
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     await page.wait_for_timeout(2000)
 
-    # Clica nas setas dos carrosséis do footer
     right_arrows = await page.query_selector_all('[class*="sliderRightArrow"]')
     for arrow in right_arrows[-2:]:
         for _ in range(20):
@@ -64,7 +58,6 @@ async def coletar_links_banners(page, url):
 
     await page.wait_for_timeout(1000)
 
-    # Coleta links dos carrosséis
     links = await page.evaluate("""
         () => {
             const sections = document.querySelectorAll('[class*="vtex-slider-layout-0-x-sliderTrackContainer"]');
@@ -90,7 +83,6 @@ async def coletar_links_banners(page, url):
         }
     """)
 
-    # Coleta banners de categoria (fora dos carrosséis)
     cat_links = await page.evaluate("""
         () => {
             const inCarousel = new Set(
@@ -118,7 +110,6 @@ async def coletar_links_banners(page, url):
 
     todos = links + cat_links
 
-    # Alerta se nenhum banner foi encontrado — provavelmente os seletores quebraram
     if len(todos) == 0:
         print(f"  ⚠ ATENÇÃO: nenhum banner encontrado em {url}. Verificar seletores CSS.")
 
@@ -128,11 +119,12 @@ async def coletar_links_banners(page, url):
 # ─── Verificação de URL ───────────────────────────────────────────────────────
 
 async def verificar_url(browser, href, base_url):
-    """Cada URL abre seu próprio contexto para evitar estado sujo entre páginas."""
     if href.startswith('http'):
         full_url = href
     else:
         full_url = base_url.rstrip('/') + '/' + href.lstrip('/')
+
+    full_url = unquote(full_url)
 
     DOMINIOS_EXTERNOS_OK = [
         'app.contabemol.com.br',
@@ -154,7 +146,6 @@ async def verificar_url(browser, href, base_url):
         )
         page = await context.new_page()
 
-        # Variáveis inicializadas antes do loop para evitar NameError no fallback
         status = "ERR"
         title  = "Erro desconhecido"
 
@@ -190,7 +181,6 @@ async def verificar_url(browser, href, base_url):
                         await page.wait_for_timeout(3000)
                         continue
 
-            # Ambas as tentativas falharam
             return {
                 "url":    full_url,
                 "status": status,
@@ -208,7 +198,6 @@ async def verificar_site(browser, site):
     print(f"\n{'='*50}")
     print(f"Verificando: {site['nome']} ({site['url']})")
 
-    # Contexto exclusivo para coleta de banners
     context = await browser.new_context(
         viewport={"width": 1440, "height": 900},
         user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -242,9 +231,6 @@ def gerar_html_report(todos_resultados, data_hora):
     total_erro = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
     total      = total_ok + total_erro
 
-    status_cor   = "#2e7d32" if total_erro == 0 else "#c62828"
-    status_texto = "✅ Tudo OK!" if total_erro == 0 else f"⚠️ {total_erro} problema(s) encontrado(s)"
-
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
@@ -255,8 +241,8 @@ def gerar_html_report(todos_resultados, data_hora):
     <p style="margin:6px 0 0;opacity:0.8;font-size:13px">{data_hora}</p>
   </div>
 
-  <div style="background:{status_cor};color:white;padding:14px 24px;font-size:16px;font-weight:bold">
-    {status_texto} &nbsp;·&nbsp; {total_ok}/{total} banners OK
+  <div style="background:#c62828;color:white;padding:14px 24px;font-size:16px;font-weight:bold">
+    ⚠️ {total_erro} problema(s) encontrado(s) &nbsp;·&nbsp; {total_ok}/{total} banners OK
   </div>
 
   <div style="display:flex;gap:12px;padding:16px 0">
@@ -270,18 +256,19 @@ def gerar_html_report(todos_resultados, data_hora):
     </div>
     <div style="flex:1;background:#e3f2fd;border-radius:8px;padding:16px;text-align:center">
       <div style="font-size:28px;font-weight:bold;color:#1565c0">{total}</div>
-      <div style="color:#555;font-size:13px">Total</div>
+      <div style="color:#555;font-size:13px">Total verificado</div>
     </div>
   </div>
 """
 
     for site_nome, resultados in todos_resultados:
-        erros    = [r for r in resultados if not r['ok']]
-        ok_count = len(resultados) - len(erros)
+        erros = [r for r in resultados if not r['ok']]
+        if not erros:
+            continue
 
         html += f"""
   <h2 style="margin:24px 0 8px;font-size:16px;border-bottom:2px solid #003087;padding-bottom:6px">
-    {site_nome} — {ok_count}/{len(resultados)} OK
+    {site_nome} — {len(erros)} banner(s) com problema
   </h2>
   <table style="width:100%;border-collapse:collapse;font-size:13px">
     <tr style="background:#f5f5f5">
@@ -291,13 +278,10 @@ def gerar_html_report(todos_resultados, data_hora):
       <th style="padding:8px 10px;text-align:left;border:1px solid #ddd">Seção</th>
     </tr>
 """
-        for r in resultados:
-            bg           = "#ffffff" if r['ok'] else "#fff3f3"
-            status_icon  = "✅" if r['ok'] else "❌"
-            status_label = str(r['status'])
+        for r in erros:
             html += f"""
-    <tr style="background:{bg}">
-      <td style="padding:7px 10px;border:1px solid #ddd;white-space:nowrap">{status_icon} {status_label}</td>
+    <tr style="background:#fff3f3">
+      <td style="padding:7px 10px;border:1px solid #ddd;white-space:nowrap">❌ {r['status']}</td>
       <td style="padding:7px 10px;border:1px solid #ddd">{r['title']}</td>
       <td style="padding:7px 10px;border:1px solid #ddd;font-family:monospace;font-size:11px">
         <a href="{r['url']}" style="color:#003087">{r['url'][:80]}</a>
@@ -320,7 +304,7 @@ def gerar_html_report(todos_resultados, data_hora):
 # ─── Envio de e-mail via SendGrid ─────────────────────────────────────────────
 
 def enviar_email(html, data_hora, total_erros):
-    assunto = f"{'⚠️ ATENÇÃO' if total_erros > 0 else '✅ OK'} — Report Banners Bemol {data_hora}"
+    assunto = f"⚠️ ATENÇÃO — {total_erros} banner(s) com problema · Bemol {data_hora}"
 
     message = Mail(
         from_email=EMAIL_REMETENTE,
@@ -329,7 +313,6 @@ def enviar_email(html, data_hora, total_erros):
         html_content=html,
     )
 
-    # Desativa rastreamento de cliques para não quebrar URLs com caracteres especiais
     message.tracking_settings = TrackingSettings(
         click_tracking=ClickTracking(enable=False, enable_text=False)
     )
@@ -354,17 +337,22 @@ async def main():
             todos_resultados.append((site['nome'], resultados))
         await browser.close()
 
-    html        = gerar_html_report(todos_resultados, data_hora)
     total_erros = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
+
+    html = gerar_html_report(todos_resultados, data_hora)
 
     with open("report_banners.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("📄 Relatório salvo em report_banners.html")
 
-    if SENDGRID_API_KEY:
-        enviar_email(html, data_hora, total_erros)
+    if total_erros > 0:
+        print(f"⚠️  {total_erros} problema(s) encontrado(s) — enviando e-mail...")
+        if SENDGRID_API_KEY:
+            enviar_email(html, data_hora, total_erros)
+        else:
+            print("⚠️  Variável SENDGRID_API_KEY não configurada")
     else:
-        print("⚠️  Variável SENDGRID_API_KEY não configurada")
+        print("✅ Tudo OK — nenhum e-mail enviado.")
 
     print(f"\n{'='*50}")
     print(f"Total com problema: {total_erros}")
