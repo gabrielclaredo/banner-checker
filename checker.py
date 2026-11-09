@@ -28,7 +28,7 @@ AVISO_DIAS = 2   # avisa quando faltam até X dias pro banner vencer
 
 # REPORT_COMPLETO = True  → e-mail chega SEMPRE, listando todos os banners (fase de avaliação)
 # REPORT_COMPLETO = False → e-mail chega só quando houver problema
-REPORT_COMPLETO = True
+REPORT_COMPLETO = False
 
 SITES = [
     {"nome": "Bemol",       "url": "https://www.bemol.com.br"},
