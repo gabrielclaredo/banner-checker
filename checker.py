@@ -12,11 +12,12 @@ import io
 import re
 import unicodedata
 from datetime import date, timedelta
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")   # tesseract com 1 thread: evita lentidão em paralelo
 from PIL import Image, ImageOps
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -204,24 +205,35 @@ def _normalizar(texto):
     return re.sub(r'\s+', ' ', texto)
 
 
-def ler_texto_ocr(img_bytes):
+OCR_TIMEOUT = 20                                   # segundos por leitura; passou disso, conta como falha
+OCR_SIMULTANEOS = asyncio.Semaphore(max(1, os.cpu_count() or 1))
+
+
+def _preparar_imagem(img_bytes):
     img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-    # Aumenta a imagem pra ajudar o OCR em texto pequeno
-    escala = max(1, int(1600 / max(img.size)))
-    if escala > 1:
-        img = img.resize((img.width * escala, img.height * escala), Image.LANCZOS)
-    cinza = ImageOps.grayscale(img)
-    textos, ultimo_erro = [], None
-    for variante in (cinza, ImageOps.invert(cinza)):      # texto escuro e texto claro
-        for psm in (11, 6):                                 # texto esparso e bloco
-            try:
-                textos.append(pytesseract.image_to_string(variante, lang='por', config=f'--psm {psm}'))
-            except Exception as e:
-                ultimo_erro = e
-    if not textos:
-        # Nenhuma tentativa funcionou: o leitor está com problema (não é só imagem sem texto)
-        raise RuntimeError(f"OCR não rodou: {ultimo_erro}")
-    return '\n'.join(textos)
+    # Deixa a imagem com ~1400px de largura: grande o bastante pra ler, pequena pra ser rápido
+    fator = 1400 / img.width
+    if fator < 1 or fator > 1.5:
+        img = img.resize((max(1, int(img.width * fator)), max(1, int(img.height * fator))), Image.LANCZOS)
+    return ImageOps.grayscale(img)
+
+
+def _ocr(imagem):
+    return pytesseract.image_to_string(imagem, lang='por', config='--psm 11', timeout=OCR_TIMEOUT)
+
+
+def ler_texto_ocr(img_bytes):
+    """Lê o texto da imagem. 1ª leitura normal; só faz a 2ª (cores invertidas,
+    pra texto claro em fundo escuro) se a 1ª não achou data."""
+    cinza = _preparar_imagem(img_bytes)
+    texto = _ocr(cinza)                       # se o OCR não estiver instalado ou travar, levanta erro
+    if extrair_data(texto).get('data_fim'):
+        return texto
+    try:
+        texto += '\n' + _ocr(ImageOps.invert(cinza))
+    except Exception:
+        pass                                  # a 1ª leitura já valeu; segue com ela
+    return texto
 
 
 def _ano_para(dia, mes, ano_txt, hoje):
@@ -339,7 +351,8 @@ async def ler_data_banner(request, item):
             if not resp.ok:
                 return 'falhou', None
             body = await resp.body()
-        texto = await asyncio.to_thread(ler_texto_ocr, body)
+        async with OCR_SIMULTANEOS:
+            texto = await asyncio.to_thread(ler_texto_ocr, body)
         leitura = extrair_data(texto)
         leitura['texto_lido'] = _texto_limpo(texto)
         if leitura.get('tem_data'):
