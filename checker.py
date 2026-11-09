@@ -19,7 +19,7 @@ from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -647,7 +647,8 @@ async def verificar_site(browser, site):
         resultado['leitura_situacao'] = item.get('leitura_situacao', 'falhou')
         resultado['motivo_falha'] = item.get('motivo_falha', '')
         leitura = item.get('leitura') or {}
-        resultado['texto_lido'] = leitura.get('texto_lido', '')
+        trecho = leitura.get('texto_encontrado') or ''
+        resultado['data_trecho'] = '' if trecho.startswith('leituras divergentes') else trecho
         resultado['data_fim']   = leitura.get('data_fim')
         resultado['data_status'], resultado['data_desc'] = classificar_data(item.get('leitura'))
         return resultado
@@ -688,7 +689,32 @@ def gerar_html_report(todos_resultados, data_hora):
             return '<span style="background:#FFFBEB;color:#B45309;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">⏳ VENCE EM BREVE</span>'
         return '<span style="background:#F1F5F9;color:#475569;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">? REVISAR</span>'
 
-    resumo_status = f"{total_erro} link(s) com problema · {total_vencidos} banner(s) vencido(s)"
+    # Faixa de status: verde (tudo certo), amarela (atenção), vermelha (problema)
+    if total_erro or total_vencidos:
+        partes = []
+        if total_erro:
+            partes.append(f"{total_erro} link(s) com problema")
+        if total_vencidos:
+            partes.append(f"{total_vencidos} banner(s) vencido(s)")
+        st_icone, st_texto, st_fundo, st_borda, st_cor = '⚠️', ' · '.join(partes), '#FEF2F2', '#FECACA', '#DC2626'
+    elif total_vencendo or total_revisar or nao_lidos:
+        partes = []
+        if total_vencendo:
+            partes.append(f"{total_vencendo} banner(s) vencendo em breve")
+        if total_revisar:
+            partes.append(f"{total_revisar} pra conferir")
+        if nao_lidos:
+            partes.append(f"{len(nao_lidos)} sem data verificada")
+        st_icone, st_texto, st_fundo, st_borda, st_cor = '🔎', ' · '.join(partes), '#FFFBEB', '#FDE68A', '#B45309'
+    else:
+        st_icone, st_texto, st_fundo, st_borda, st_cor = '✅', 'Tudo certo: nenhum link com problema e nenhum banner vencido', '#F0FDF4', '#BBF7D0', '#15803D'
+
+    def card(valor, rotulo, cor_valor, alerta):
+        borda = '#FECACA' if alerta else '#E2E8F0'
+        cor = cor_valor if (alerta or cor_valor != '#DC2626') else '#1E293B'
+        return (f'<div style="flex:1;background:white;border:1px solid {borda};border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">'
+                f'<div style="font-size:32px;font-weight:700;color:{cor}">{valor}</div>'
+                f'<div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">{rotulo}</div></div>')
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -709,30 +735,18 @@ def gerar_html_report(todos_resultados, data_hora):
     </div>
 
     <!-- Banner de status -->
-    <div style="background:#FEF2F2;border:1px solid #FECACA;border-top:none;padding:14px 28px;display:flex;align-items:center;gap:10px">
-      <span style="font-size:16px">⚠️</span>
-      <span style="font-size:14px;font-weight:600;color:#DC2626">{resumo_status}</span>
+    <div style="background:{st_fundo};border:1px solid {st_borda};border-top:none;padding:14px 28px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:16px">{st_icone}</span>
+      <span style="font-size:14px;font-weight:600;color:{st_cor}">{st_texto}</span>
       <span style="margin-left:auto;font-size:13px;color:#64748B;font-weight:500">{total_ok}/{total} links OK</span>
     </div>
 
     <!-- Cards de resumo -->
     <div style="display:flex;gap:12px;margin:16px 0">
-      <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
-        <div style="font-size:32px;font-weight:700;color:#15803D">{total_ok}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Links OK</div>
-      </div>
-      <div style="flex:1;background:white;border:1px solid #FECACA;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
-        <div style="font-size:32px;font-weight:700;color:#DC2626">{total_erro}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Links com problema</div>
-      </div>
-      <div style="flex:1;background:white;border:1px solid #FECACA;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
-        <div style="font-size:32px;font-weight:700;color:#DC2626">{total_vencidos}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Datas vencidas</div>
-      </div>
-      <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
-        <div style="font-size:32px;font-weight:700;color:#1E293B">{total}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Total verificado</div>
-      </div>
+      {card(total_ok, 'Links OK', '#15803D', False)}
+      {card(total_erro, 'Links com problema', '#DC2626', total_erro > 0)}
+      {card(total_vencidos, 'Datas vencidas', '#DC2626', total_vencidos > 0)}
+      {card(total, 'Total verificado', '#1E293B', False)}
     </div>
 """
 
@@ -779,7 +793,7 @@ def gerar_html_report(todos_resultados, data_hora):
       <table style="width:100%;border-collapse:collapse">
         <tr style="background:#F8FAFC">
           <th style="{th}">Banner</th>
-          <th style="{th}">Texto lido</th>
+          <th style="{th}">Data lida</th>
           <th style="{th}">Data</th>
           <th style="{th}">Link</th>
           <th style="{th}">Apto?</th>
@@ -787,7 +801,7 @@ def gerar_html_report(todos_resultados, data_hora):
             for r in resultados:
                 thumb = (f'<img src="{r["img"]}" style="width:160px;max-height:90px;object-fit:contain;border-radius:6px;display:block;margin-bottom:6px">'
                          if r.get('img') else '<div style="color:#94A3B8;font-size:11px;margin-bottom:6px">(sem imagem)</div>')
-                texto = r.get('texto_lido') or '<span style="color:#94A3B8">—</span>'
+                texto = r.get('data_trecho') or '<span style="color:#94A3B8">—</span>'
                 link_status = (f'<span style="color:#15803D;font-weight:700">✓ {r["status"]}</span>' if r['ok']
                                else f'<span style="color:#DC2626;font-weight:700">✕ {r["status"]}</span>')
                 html += f"""
