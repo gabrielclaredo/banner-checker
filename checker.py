@@ -13,7 +13,8 @@ import re
 import unicodedata
 from datetime import date, timedelta
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")   # tesseract com 1 thread: evita lentidão em paralelo
-from PIL import Image, ImageOps
+from collections import Counter
+from PIL import Image, ImageOps, ImageStat
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
@@ -201,6 +202,14 @@ PALAVRAS_RELATIVAS = [
 def _normalizar(texto):
     texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode()
     texto = texto.lower()
+    # Confusões comuns do OCR dentro de datas: "3O/11" -> "30/11", "30/l1" -> "30/11"
+    texto = re.sub(r'(?<=[\d/])[o](?=[\d/])', '0', texto)
+    texto = re.sub(r'(?<=[\d/])[li|](?=[\d/]|\b)', '1', texto)
+    texto = re.sub(r'(?<=\d)[o](?=/)', '0', texto)
+    # Espaço perdido no meio do mês: "30/1 1" -> "30/11"
+    texto = re.sub(r'(\b\d{1,2})\s*/\s*(\d)\s(\d)(?!\d)',
+                   lambda m: f"{m.group(1)}/{m.group(2)}{m.group(3)}" if int(m.group(2) + m.group(3)) <= 12 else m.group(0),
+                   texto)
     texto = re.sub(r'[^\w/\-–:,.\s]', ' ', texto)
     return re.sub(r'\s+', ' ', texto)
 
@@ -209,31 +218,73 @@ OCR_TIMEOUT = 20                                   # segundos por leitura; passo
 OCR_SIMULTANEOS = asyncio.Semaphore(max(1, os.cpu_count() or 1))
 
 
-def _preparar_imagem(img_bytes):
+def _abrir_cinza(img_bytes):
     img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-    # Deixa a imagem com ~1400px de largura: grande o bastante pra ler, pequena pra ser rápido
-    fator = 1400 / img.width
-    if fator < 1 or fator > 1.5:
-        img = img.resize((max(1, int(img.width * fator)), max(1, int(img.height * fator))), Image.LANCZOS)
+    # Imagens muito pequenas são ampliadas até ~1400px de largura; as grandes ficam como estão
+    if img.width < 1000:
+        fator = 1400 / img.width
+        img = img.resize((int(img.width * fator), int(img.height * fator)), Image.LANCZOS)
     return ImageOps.grayscale(img)
 
 
-def _ocr(imagem):
-    return pytesseract.image_to_string(imagem, lang='por', config='--psm 11', timeout=OCR_TIMEOUT)
+def _ocr(imagem, psm):
+    return pytesseract.image_to_string(imagem, lang='por', config=f'--psm {psm}', timeout=OCR_TIMEOUT)
 
 
-def ler_texto_ocr(img_bytes):
-    """Lê o texto da imagem. 1ª leitura normal; só faz a 2ª (cores invertidas,
-    pra texto claro em fundo escuro) se a 1ª não achou data."""
-    cinza = _preparar_imagem(img_bytes)
-    texto = _ocr(cinza)                       # se o OCR não estiver instalado ou travar, levanta erro
-    if extrair_data(texto).get('data_fim'):
-        return texto
-    try:
-        texto += '\n' + _ocr(ImageOps.invert(cinza))
-    except Exception:
-        pass                                  # a 1ª leitura já valeu; segue com ela
-    return texto
+def _faixas(cinza, n=4, ampliar=1.0):
+    """Corta a imagem em faixas horizontais (com sobra entre elas).
+    Necessário porque o OCR ignora letra pequena quando há um título grande na mesma imagem."""
+    h = cinza.height
+    passo = h / n
+    for i in range(n):
+        y0 = max(0, int(i * passo - passo / 3))
+        y1 = min(h, int((i + 1) * passo + passo / 3))
+        f = cinza.crop((0, y0, cinza.width, y1))
+        if ampliar != 1.0:
+            f = f.resize((int(f.width * ampliar), int(f.height * ampliar)), Image.LANCZOS)
+        yield f
+
+
+def ler_textos_ocr(img_bytes, lupa=False):
+    """Devolve uma lista de textos, um por leitura.
+    Normal: imagem inteira + 4 faixas, cada uma em preto-no-branco e branco-no-preto.
+    Lupa: as mesmas faixas ampliadas 2x (usada pra confirmar antes de acusar 'vencido')."""
+    cinza = _abrir_cinza(img_bytes)
+    leituras = []
+    if not lupa:
+        leituras.append((cinza, 11))
+        leituras.append((ImageOps.invert(cinza), 11))
+    for f in _faixas(cinza, ampliar=2.0 if lupa else 1.0):
+        leituras.append((f, 6))
+        leituras.append((ImageOps.invert(f), 6))
+
+    textos, erros = [], []
+    for imagem, psm in leituras:
+        try:
+            textos.append(_ocr(imagem, psm))
+        except Exception as e:
+            erros.append(e)
+    if not textos:
+        # Nenhuma leitura funcionou: o leitor está com problema (não é só imagem sem texto)
+        raise RuntimeError(f"OCR não rodou: {erros[-1] if erros else 'erro desconhecido'}")
+    return textos
+
+
+def decidir_data(textos):
+    """Junta várias leituras da mesma imagem.
+    A data que aparece em MAIS leituras vence (um dígito lido errado numa leitura não decide sozinho).
+    Em empate, fica a mais distante, pra evitar alarme falso."""
+    resultados = [extrair_data(t) for t in textos]
+    votos = Counter(r['data_fim'] for r in resultados if r.get('data_fim'))
+    if votos:
+        mais_votos = max(votos.values())
+        escolhida = max(d for d, v in votos.items() if v == mais_votos)
+        r = next(r for r in resultados if r.get('data_fim') == escolhida)
+        return dict(r, votos=f"{votos[escolhida]}/{len(textos)}")
+    relativos = [r for r in resultados if r.get('tem_data')]
+    if relativos:
+        return relativos[0]
+    return {"tem_data": False, "data_fim": None, "texto_encontrado": None, "confianca": "alta"}
 
 
 def _ano_para(dia, mes, ano_txt, hoje):
@@ -352,9 +403,21 @@ async def ler_data_banner(request, item):
                 return 'falhou', None
             body = await resp.body()
         async with OCR_SIMULTANEOS:
-            texto = await asyncio.to_thread(ler_texto_ocr, body)
-        leitura = extrair_data(texto)
-        leitura['texto_lido'] = _texto_limpo(texto)
+            textos = await asyncio.to_thread(ler_textos_ocr, body)
+        leitura = decidir_data(textos)
+        # Antes de acusar "vencido", confere de novo com a imagem ampliada
+        if leitura.get('data_fim') and date.fromisoformat(leitura['data_fim']) < _hoje():
+            try:
+                async with OCR_SIMULTANEOS:
+                    textos += await asyncio.to_thread(ler_textos_ocr, body, True)
+                leitura = decidir_data(textos)
+            except Exception:
+                pass
+        # Texto pro report: leitura da imagem inteira + só as linhas das faixas que têm número
+        # (as faixas cortam títulos ao meio e geram lixo, que não ajuda a avaliar)
+        inteiras = textos[:2]
+        de_faixas = [l for t in textos[2:] for l in t.splitlines() if re.search(r'\d', l)]
+        leitura['texto_lido'] = _texto_limpo('\n'.join(inteiras + de_faixas))
         if leitura.get('tem_data'):
             print(f"    📅 {item['href'][:50]} → {leitura}")
         return 'ok', leitura
