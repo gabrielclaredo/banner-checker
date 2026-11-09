@@ -14,11 +14,11 @@ import unicodedata
 from datetime import date, timedelta
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")   # tesseract com 1 thread: evita lentidão em paralelo
 from collections import Counter
-from PIL import Image, ImageOps, ImageStat
+from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -203,6 +203,10 @@ def _normalizar(texto):
     texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode()
     texto = texto.lower()
     # Confusões comuns do OCR dentro de datas: "3O/11" -> "30/11", "30/l1" -> "30/11"
+    # "30/[1", "30/]1", "30/{1", "30/|1", "3[/11"... -> o OCR troca o "1" fino por um traço/colchete
+    texto = re.sub(r'(\d\s?/)\s?[\[\]{}|!li](?=\d)', r'\g<1>1', texto)
+    texto = re.sub(r'(?<=/\d)[\[\]{}|](?=\D|$)', '1', texto)
+    texto = re.sub(r'(?<=\d)[\[\]{}|](?=\d|/)', '1', texto)
     texto = re.sub(r'(?<=[\d/])[o](?=[\d/])', '0', texto)
     texto = re.sub(r'(?<=[\d/])[li|](?=[\d/]|\b)', '1', texto)
     texto = re.sub(r'(?<=\d)[o](?=/)', '0', texto)
@@ -210,6 +214,13 @@ def _normalizar(texto):
     texto = re.sub(r'(\b\d{1,2})\s*/\s*(\d)\s(\d)(?!\d)',
                    lambda m: f"{m.group(1)}/{m.group(2)}{m.group(3)}" if int(m.group(2) + m.group(3)) <= 12 else m.group(0),
                    texto)
+    # Barra perdida em intervalo: "06 a 3011" -> "06 a 30/11" (fonte com "/" fina demais)
+    def _barra(m):
+        ini, dia, mes = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= ini <= 31 and 1 <= dia <= 31 and 1 <= mes <= 12:
+            return f"{m.group(1)} a {m.group(2)}/{m.group(3)}"
+        return m.group(0)
+    texto = re.sub(r'(?<![\d/,.])(\d{1,2})\s*a\s*([0-3]\d)([01]\d)(?![\d/,.%])', _barra, texto)
     texto = re.sub(r'[^\w/\-–:,.\s]', ' ', texto)
     return re.sub(r'\s+', ' ', texto)
 
@@ -218,11 +229,13 @@ OCR_TIMEOUT = 20                                   # segundos por leitura; passo
 OCR_SIMULTANEOS = asyncio.Semaphore(max(1, os.cpu_count() or 1))
 
 
-def _abrir_cinza(img_bytes):
+LARGURA_LEITURA = 2800   # a letra miúda (rodapé "válido até…") só é lida bem com a imagem nesse tamanho
+
+
+def _abrir_cinza(img_bytes, largura=LARGURA_LEITURA):
     img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-    # Imagens muito pequenas são ampliadas até ~1400px de largura; as grandes ficam como estão
-    if img.width < 1000:
-        fator = 1400 / img.width
+    if img.width < largura * 0.85:
+        fator = largura / img.width
         img = img.resize((int(img.width * fator), int(img.height * fator)), Image.LANCZOS)
     return ImageOps.grayscale(img)
 
@@ -247,16 +260,18 @@ def _faixas(cinza, n=4, ampliar=1.0):
 
 def ler_textos_ocr(img_bytes, lupa=False):
     """Devolve uma lista de textos, um por leitura.
-    Normal: imagem inteira + 4 faixas, cada uma em preto-no-branco e branco-no-preto.
-    Lupa: as mesmas faixas ampliadas 2x (usada pra confirmar antes de acusar 'vencido')."""
-    cinza = _abrir_cinza(img_bytes)
-    leituras = []
+    Normal: imagem inteira ampliada (normal, nítida e invertida, 2 modos) + 4 faixas nas duas polaridades.
+    Lupa: imagem inteira ainda mais ampliada (usada pra confirmar antes de acusar 'vencido')."""
+    cinza = _abrir_cinza(img_bytes, LARGURA_LEITURA * (1.5 if lupa else 1))
+    nitida = cinza.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    leituras = [
+        (cinza, 11), (cinza, 6), (nitida, 11), (nitida, 6),
+        (ImageOps.invert(cinza), 11), (ImageOps.invert(nitida), 6),
+    ]
     if not lupa:
-        leituras.append((cinza, 11))
-        leituras.append((ImageOps.invert(cinza), 11))
-    for f in _faixas(cinza, ampliar=2.0 if lupa else 1.0):
-        leituras.append((f, 6))
-        leituras.append((ImageOps.invert(f), 6))
+        for f in _faixas(cinza):
+            leituras.append((f, 6))
+            leituras.append((ImageOps.invert(f), 6))
 
     textos, erros = [], []
     for imagem, psm in leituras:
@@ -270,15 +285,45 @@ def ler_textos_ocr(img_bytes, lupa=False):
     return textos
 
 
+def _juntar_digito_perdido(votos):
+    """O OCR costuma PERDER o '1' fino (lê 30/1 em vez de 30/11), mas quase nunca inventa dígito.
+    Se uma data com mês de 1 dígito (30/01) concorre com a mesma data com mês de 2 dígitos que
+    começa igual (30/11, 30/10, 30/12) lida em 2+ leituras, os votos vão pra versão mais longa."""
+    votos = Counter(votos)
+    for curta in list(votos):
+        dc = date.fromisoformat(curta)
+        if dc.month != 1:
+            continue
+        for longa in list(votos):
+            dl = date.fromisoformat(longa)
+            if longa != curta and votos[longa] >= 2 and dl.day == dc.day and dl.month in (10, 11, 12) \
+                    and abs(dl.year - dc.year) <= 1:
+                votos[longa] += votos.pop(curta)
+                break
+    return votos
+
+
 def decidir_data(textos):
     """Junta várias leituras da mesma imagem.
-    A data que aparece em MAIS leituras vence (um dígito lido errado numa leitura não decide sozinho).
-    Em empate, fica a mais distante, pra evitar alarme falso."""
+    - A data que aparece em MAIS leituras vence (um dígito lido errado numa leitura não decide sozinho).
+    - Empate: fica a mais distante, pra evitar alarme falso.
+    - Se a vencedora já passou, mas 2+ leituras viram uma data ainda válida, as leituras
+      discordam: o banner vai pra 'conferir' (nem alarme falso, nem passa calado)."""
     resultados = [extrair_data(t) for t in textos]
     votos = Counter(r['data_fim'] for r in resultados if r.get('data_fim'))
+    votos = _juntar_digito_perdido(votos)
     if votos:
         mais_votos = max(votos.values())
         escolhida = max(d for d, v in votos.items() if v == mais_votos)
+        hoje = _hoje()
+        if date.fromisoformat(escolhida) < hoje:
+            validas = {d: v for d, v in votos.items() if date.fromisoformat(d) >= hoje and v >= 2}
+            if validas:
+                alternativa = max(validas, key=lambda d: (validas[d], d))
+                fmt = lambda d: date.fromisoformat(d).strftime('%d/%m/%Y')
+                return {"tem_data": True, "data_fim": None, "confianca": "baixa",
+                        "texto_encontrado": f"leituras divergentes: {fmt(escolhida)} ou {fmt(alternativa)}",
+                        "votos": f"{votos[escolhida]} x {validas[alternativa]}"}
         r = next(r for r in resultados if r.get('data_fim') == escolhida)
         return dict(r, votos=f"{votos[escolhida]}/{len(textos)}")
     relativos = [r for r in resultados if r.get('tem_data')]
@@ -309,10 +354,18 @@ def _ano_para(dia, mes, ano_txt, hoje):
 PALAVRAS_INICIO = ('a partir', 'comeca', 'inicia', 'inicio')
 
 
-def _eh_data_de_inicio(t, pos):
-    """True se a data em 'pos' vem logo depois de 'a partir de', 'começa', 'inicia'..."""
+RE_INICIO_DE_INTERVALO = re.compile(r'\s*(?:a|ate|-|–|e)\s+\d')
+
+
+def _eh_data_de_inicio(t, pos, fim=None):
+    """True se a data é de INÍCIO: vem depois de 'a partir de', 'começa', 'inicia'...
+    ou é a primeira data de um intervalo ('de 16/10 a 30/11' -> 16/10 é início)."""
     antes = t[max(0, pos - 20):pos]
-    return any(p in antes for p in PALAVRAS_INICIO)
+    if any(p in antes for p in PALAVRAS_INICIO):
+        return True
+    if fim is not None and RE_INICIO_DE_INTERVALO.match(t, fim):
+        return True
+    return False
 
 
 def extrair_data(texto_bruto):
@@ -333,7 +386,7 @@ def extrair_data(texto_bruto):
                 pass
 
     for m in RE_EXTENSO.finditer(t):
-        if _eh_data_de_inicio(t, m.start()):
+        if _eh_data_de_inicio(t, m.start(), m.end()):
             continue
         dia, mes = int(m.group(1)), MESES[m.group(2)]
         ano = _ano_para(dia, mes, m.group(3), hoje)
@@ -347,7 +400,7 @@ def extrair_data(texto_bruto):
         dia, mes = int(m.group(1)), int(m.group(2))
         if not (1 <= dia <= 31 and 1 <= mes <= 12):
             continue
-        if _eh_data_de_inicio(t, m.start()):
+        if _eh_data_de_inicio(t, m.start(), m.end()):
             continue
         # Exige alguma pista de que é data (evita "10/12" de preço solto)
         contexto = t[max(0, m.start() - 25):m.end() + 5]
@@ -415,8 +468,8 @@ async def ler_data_banner(request, item):
                 pass
         # Texto pro report: leitura da imagem inteira + só as linhas das faixas que têm número
         # (as faixas cortam títulos ao meio e geram lixo, que não ajuda a avaliar)
-        inteiras = textos[:2]
-        de_faixas = [l for t in textos[2:] for l in t.splitlines() if re.search(r'\d', l)]
+        inteiras = textos[:1]
+        de_faixas = [l for t in textos[1:] for l in t.splitlines() if re.search(r'\d', l)]
         leitura['texto_lido'] = _texto_limpo('\n'.join(inteiras + de_faixas))
         if leitura.get('tem_data'):
             print(f"    📅 {item['href'][:50]} → {leitura}")
@@ -441,6 +494,8 @@ def classificar_data(leitura):
             if fim <= hoje + timedelta(days=AVISO_DIAS):
                 return 'vencendo', f"Vence em {fim.strftime('%d/%m')} · \"{texto}\""
             return None, ''
+        if texto.startswith('leituras divergentes'):
+            return 'revisar', f"Data incerta ({texto}), conferir no banner"
         return 'revisar', f"Prazo relativo, conferir manualmente · \"{texto}\""
     except Exception:
         return None, ''
@@ -652,6 +707,8 @@ def gerar_html_report(todos_resultados, data_hora):
             if ds == 'vencendo':
                 return f'<span style="color:#B45309;font-weight:700">{r["data_desc"].split(" · ")[0]}</span>'
             if ds == 'revisar':
+                if 'divergentes' in (r.get('data_desc') or ''):
+                    return f'<span style="color:#B45309;font-weight:600">{r["data_desc"]}</span>'
                 return '<span style="color:#475569;font-weight:600">Prazo relativo (revisar)</span>'
             if r.get('data_fim'):
                 try:
