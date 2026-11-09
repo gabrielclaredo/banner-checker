@@ -19,7 +19,7 @@ from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
