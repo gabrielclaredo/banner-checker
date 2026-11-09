@@ -8,6 +8,7 @@ from sendgrid.helpers.mail import Mail, TrackingSettings, ClickTracking
 from playwright.async_api import async_playwright
 
 # ─── NOVO: imports da leitura de datas (OCR local, sem serviço externo) ──────
+import base64
 import io
 import re
 import unicodedata
@@ -18,7 +19,7 @@ from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -233,7 +234,14 @@ LARGURA_LEITURA = 2800   # a letra miúda (rodapé "válido até…") só é lid
 
 
 def _abrir_cinza(img_bytes, largura=LARGURA_LEITURA):
-    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+    img = Image.open(io.BytesIO(img_bytes))
+    img.seek(0)                                    # GIF animado: usa o 1º quadro
+    if img.mode in ('RGBA', 'LA', 'P', 'PA'):
+        # Fundo transparente vira BRANCO (convertido direto ficaria preto e esconderia texto escuro)
+        rgba = img.convert('RGBA')
+        fundo = Image.new('RGBA', rgba.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(fundo, rgba)
+    img = img.convert('RGB')
     if img.width < largura * 0.85:
         fator = largura / img.width
         img = img.resize((int(img.width * fator), int(img.height * fator)), Image.LANCZOS)
@@ -444,7 +452,32 @@ def _texto_limpo(texto, limite=220):
     return resultado[:limite] + ('…' if len(resultado) > limite else '')
 
 
-async def ler_data_banner(request, item):
+def _abre_no_leitor(body):
+    try:
+        Image.open(io.BytesIO(body)).load()
+        return True
+    except Exception:
+        return False
+
+
+async def _desenhar_no_navegador(context, body, tipo):
+    """Plano B pra formatos que o leitor não abre (SVG, AVIF...):
+    o navegador desenha a imagem e devolvemos um print dela em PNG."""
+    tipo = tipo or ('image/svg+xml' if body.lstrip()[:5] in (b'<svg ', b'<?xml') else 'image/png')
+    data_uri = f"data:{tipo};base64,{base64.b64encode(body).decode()}"
+    pg = await context.new_page()
+    try:
+        await pg.set_content(
+            '<html><body style="margin:0;background:#fff">'
+            f'<img id="b" src="{data_uri}" style="display:block;min-width:1400px;height:auto">'
+            '</body></html>')
+        await pg.wait_for_function("document.getElementById('b').complete", timeout=10000)
+        return await pg.locator('#b').screenshot(type='png', timeout=10000)
+    finally:
+        await pg.close()
+
+
+async def ler_data_banner(request, item, context=None):
     """Devolve (situacao, leitura). situacao: 'ok' | 'sem_imagem' | 'falhou'."""
     src = item.get('img')
     if not src:
@@ -453,8 +486,16 @@ async def ler_data_banner(request, item):
         async with SEMAFORO:
             resp = await request.get(src, timeout=30000)
             if not resp.ok:
+                item['motivo_falha'] = f"imagem não baixou (HTTP {resp.status})"
                 return 'falhou', None
             body = await resp.body()
+            tipo = resp.headers.get('content-type', '').split(';')[0].strip()
+        if not _abre_no_leitor(body):
+            if context is None:
+                item['motivo_falha'] = f"formato não suportado ({tipo or 'desconhecido'})"
+                return 'falhou', None
+            async with SEMAFORO:
+                body = await _desenhar_no_navegador(context, body, tipo)
         async with OCR_SIMULTANEOS:
             textos = await asyncio.to_thread(ler_textos_ocr, body)
         leitura = decidir_data(textos)
@@ -476,6 +517,7 @@ async def ler_data_banner(request, item):
         return 'ok', leitura
     except Exception as e:
         print(f"    ⚠ Leitor de data falhou em {src[:60]}: {e}")
+        item['motivo_falha'] = str(e)[:80]
         return 'falhou', None
 
 
@@ -587,7 +629,7 @@ async def verificar_site(browser, site):
 
     # NOVO: lê as datas nas imagens antes de fechar o contexto (usa a mesma sessão pra baixar)
     print(f"  → Lendo datas nas imagens dos banners (OCR)...")
-    leituras = await asyncio.gather(*[ler_data_banner(page.request, item) for item in links])
+    leituras = await asyncio.gather(*[ler_data_banner(page.request, item, context) for item in links])
     for item, (situacao, leitura) in zip(links, leituras):
         item['leitura_situacao'] = situacao
         item['leitura'] = leitura
@@ -603,6 +645,7 @@ async def verificar_site(browser, site):
         # NOVO: anexa o resultado da leitura de data
         resultado['img'] = item.get('img')
         resultado['leitura_situacao'] = item.get('leitura_situacao', 'falhou')
+        resultado['motivo_falha'] = item.get('motivo_falha', '')
         leitura = item.get('leitura') or {}
         resultado['texto_lido'] = leitura.get('texto_lido', '')
         resultado['data_fim']   = leitura.get('data_fim')
@@ -700,7 +743,8 @@ def gerar_html_report(todos_resultados, data_hora):
             if sit == 'sem_imagem':
                 return '<span style="color:#B45309;font-weight:600">Imagem não encontrada</span>'
             if sit != 'ok':
-                return '<span style="color:#B45309;font-weight:600">Falha na leitura</span>'
+                motivo = f'<br><span style="color:#94A3B8;font-size:11px">{r.get("motivo_falha")}</span>' if r.get('motivo_falha') else ''
+                return f'<span style="color:#B45309;font-weight:600">Falha na leitura</span>{motivo}'
             ds = r.get('data_status')
             if ds == 'vencido':
                 return f'<span style="color:#DC2626;font-weight:700">{r["data_desc"].split(" · ")[0]}</span>'
