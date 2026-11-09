@@ -7,10 +7,25 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, TrackingSettings, ClickTracking
 from playwright.async_api import async_playwright
 
+# ─── NOVO: imports da leitura de datas (OCR local, sem serviço externo) ──────
+import io
+import re
+import unicodedata
+from datetime import date, timedelta
+from PIL import Image, ImageOps
+import pytesseract
+
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+
+# ─── NOVO: configuração do leitor de datas ───────────────────────────────────
+AVISO_DIAS = 2   # avisa quando faltam até X dias pro banner vencer
+
+# REPORT_COMPLETO = True  → e-mail chega SEMPRE, listando todos os banners (fase de avaliação)
+# REPORT_COMPLETO = False → e-mail chega só quando houver problema
+REPORT_COMPLETO = True
 
 SITES = [
     {"nome": "Bemol",       "url": "https://www.bemol.com.br"},
@@ -67,8 +82,17 @@ async def coletar_links_banners(page, url):
 
     await page.wait_for_timeout(1000)
 
+    # NOVO: além do href, cada item agora traz também "img" (endereço da imagem do banner)
     links = await page.evaluate("""
         () => {
+            const pegarImg = (a) => {
+                const imgs = [...a.querySelectorAll('img')];
+                for (const img of imgs) {
+                    const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+                    if (src && !src.startsWith('data:')) return src;
+                }
+                return null;
+            };
             const sections = document.querySelectorAll('[class*="vtex-slider-layout-0-x-sliderTrackContainer"]');
             const result = [];
             let carouselIdx = 1;
@@ -78,7 +102,7 @@ async def coletar_links_banners(page, url):
                 anchors.forEach(a => {
                     const href = (a.getAttribute('href') || '').split('?')[0].trim();
                     if (href && href !== '/' && href !== '#') {
-                        result.push({ href, section: 'Carrossel ' + carouselIdx });
+                        result.push({ href, section: 'Carrossel ' + carouselIdx, img: pegarImg(a) });
                     }
                 });
                 carouselIdx++;
@@ -94,6 +118,14 @@ async def coletar_links_banners(page, url):
 
     cat_links = await page.evaluate("""
         () => {
+            const pegarImg = (a) => {
+                const imgs = [...a.querySelectorAll('img')];
+                for (const img of imgs) {
+                    const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+                    if (src && !src.startsWith('data:')) return src;
+                }
+                return null;
+            };
             const inCarousel = new Set(
                 [...document.querySelectorAll('[class*="vtex-slider-layout-0-x-sliderTrackContainer"] [class*="imageElementLink"]')]
                 .map(a => (a.getAttribute('href') || '').split('?')[0].trim())
@@ -111,7 +143,7 @@ async def coletar_links_banners(page, url):
                 if (seen.has(href)) return;
                 if (blocked.some(b => href.includes(b))) return;
                 seen.add(href);
-                result.push({ href, section: 'Categoria' });
+                result.push({ href, section: 'Categoria', img: pegarImg(a) });
             });
             return result;
         }
@@ -123,6 +155,219 @@ async def coletar_links_banners(page, url):
         print(f"  ⚠ ATENÇÃO: nenhum banner encontrado em {url}. Verificar seletores CSS.")
 
     return todos
+
+
+# ─── NOVO: Leitura de datas na imagem ─────────────────────────────────────────
+# Nada aqui levanta exceção pra fora: se qualquer coisa falhar, devolve None
+# e a verificação de links segue exatamente como antes.
+
+def _hoje():
+    # DATA_SIMULADA (formato AAAA-MM-DD) serve só pra teste: finge que hoje é outro dia
+    simulada = os.environ.get("DATA_SIMULADA", "").strip()
+    if simulada:
+        try:
+            return date.fromisoformat(simulada)
+        except ValueError:
+            pass
+    return datetime.now(ZoneInfo("America/Manaus")).date()
+
+
+MESES = {
+    'jan': 1, 'janeiro': 1, 'fev': 2, 'fevereiro': 2, 'mar': 3, 'marco': 3,
+    'abr': 4, 'abril': 4, 'mai': 5, 'maio': 5, 'jun': 6, 'junho': 6,
+    'jul': 7, 'julho': 7, 'ago': 8, 'agosto': 8, 'set': 9, 'setembro': 9,
+    'out': 10, 'outubro': 10, 'nov': 11, 'novembro': 11, 'dez': 12, 'dezembro': 12,
+}
+MESES_RE = '|'.join(sorted(MESES, key=len, reverse=True))
+
+# dd/mm ou dd/mm/aa(aa)  — exige contexto de data pra não confundir com preço/parcela
+RE_NUMERICA = re.compile(r'(?<![\d,.])(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?(?![\d,.]|\s*x)')
+# "11 de outubro", "11 out", "11/out"
+RE_EXTENSO  = re.compile(r'(?<!\d)(\d{1,2})\s*(?:de\s+|/\s*)?(' + MESES_RE + r')\b(?:\s*(?:de\s+)?(\d{4}))?')
+# "até 11", "de 5 a 12 de outubro" -> o "5" sem mês herda o mês do próximo
+RE_INTERVALO = re.compile(r'\b(?:de\s+)?(\d{1,2})\s*(?:a|ate|-|–)\s*(\d{1,2})\s*(?:de\s+)?(' + MESES_RE + r')\b')
+
+PALAVRAS_RELATIVAS = [
+    'so hoje', 'somente hoje', 'apenas hoje', 'hoje apenas', 'valido hoje',
+    'esta semana', 'essa semana', 'ultima semana', 'ultimos dias', 'ultimo dia',
+    'termina hoje', 'acaba hoje', 'termina amanha', 'acaba amanha',
+    'termina domingo', 'ate domingo', 'ate sexta', 'ate sabado', 'ate segunda',
+    'ate terca', 'ate quarta', 'ate quinta', 'fim de semana', 'final de semana',
+    'esse final de semana', 'este final de semana', '24 horas', '24h',
+]
+
+
+def _normalizar(texto):
+    texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode()
+    texto = texto.lower()
+    texto = re.sub(r'[^\w/\-–:,.\s]', ' ', texto)
+    return re.sub(r'\s+', ' ', texto)
+
+
+def ler_texto_ocr(img_bytes):
+    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+    # Aumenta a imagem pra ajudar o OCR em texto pequeno
+    escala = max(1, int(1600 / max(img.size)))
+    if escala > 1:
+        img = img.resize((img.width * escala, img.height * escala), Image.LANCZOS)
+    cinza = ImageOps.grayscale(img)
+    textos, ultimo_erro = [], None
+    for variante in (cinza, ImageOps.invert(cinza)):      # texto escuro e texto claro
+        for psm in (11, 6):                                 # texto esparso e bloco
+            try:
+                textos.append(pytesseract.image_to_string(variante, lang='por', config=f'--psm {psm}'))
+            except Exception as e:
+                ultimo_erro = e
+    if not textos:
+        # Nenhuma tentativa funcionou: o leitor está com problema (não é só imagem sem texto)
+        raise RuntimeError(f"OCR não rodou: {ultimo_erro}")
+    return '\n'.join(textos)
+
+
+def _ano_para(dia, mes, ano_txt, hoje):
+    if ano_txt:
+        ano = int(ano_txt)
+        if ano < 100:
+            ano += 2000
+        return ano
+    # Sem ano escrito: testa ano passado, atual e próximo e fica com o mais perto de hoje.
+    # Ex.: "até 24/12" lido em janeiro vira dezembro passado (vencido), não dezembro que vem.
+    melhor = None
+    for ano in (hoje.year - 1, hoje.year, hoje.year + 1):
+        try:
+            d = date(ano, mes, dia)
+        except ValueError:
+            continue
+        if melhor is None or abs((d - hoje).days) < abs((date(melhor, mes, dia) - hoje).days):
+            melhor = ano
+    return melhor
+
+
+PALAVRAS_INICIO = ('a partir', 'comeca', 'inicia', 'inicio')
+
+
+def _eh_data_de_inicio(t, pos):
+    """True se a data em 'pos' vem logo depois de 'a partir de', 'começa', 'inicia'..."""
+    antes = t[max(0, pos - 20):pos]
+    return any(p in antes for p in PALAVRAS_INICIO)
+
+
+def extrair_data(texto_bruto):
+    """Devolve dict no mesmo formato do leitor anterior."""
+    hoje = _hoje()
+    t = _normalizar(texto_bruto)
+    datas = []   # (date, trecho)
+
+    for m in RE_INTERVALO.finditer(t):
+        if _eh_data_de_inicio(t, m.start()):
+            continue
+        mes = MESES[m.group(3)]
+        ano = _ano_para(int(m.group(2)), mes, None, hoje)
+        if ano:
+            try:
+                datas.append((date(ano, mes, int(m.group(2))), m.group(0)))
+            except ValueError:
+                pass
+
+    for m in RE_EXTENSO.finditer(t):
+        if _eh_data_de_inicio(t, m.start()):
+            continue
+        dia, mes = int(m.group(1)), MESES[m.group(2)]
+        ano = _ano_para(dia, mes, m.group(3), hoje)
+        if ano:
+            try:
+                datas.append((date(ano, mes, dia), m.group(0)))
+            except ValueError:
+                pass
+
+    for m in RE_NUMERICA.finditer(t):
+        dia, mes = int(m.group(1)), int(m.group(2))
+        if not (1 <= dia <= 31 and 1 <= mes <= 12):
+            continue
+        if _eh_data_de_inicio(t, m.start()):
+            continue
+        # Exige alguma pista de que é data (evita "10/12" de preço solto)
+        contexto = t[max(0, m.start() - 25):m.end() + 5]
+        if not re.search(r'ate|valid|de |a |promo|oferta|dia|/\d{2,4}', contexto):
+            continue
+        ano = _ano_para(dia, mes, m.group(3), hoje)
+        if ano:
+            try:
+                datas.append((date(ano, mes, dia), m.group(0)))
+            except ValueError:
+                pass
+
+    if datas:
+        # Descarta datas absurdas (mais de 1 ano no passado ou 2 anos no futuro: ruído do OCR)
+        datas = [d for d in datas if hoje - timedelta(days=365) <= d[0] <= hoje + timedelta(days=730)]
+    if datas:
+        fim, trecho = max(datas, key=lambda x: x[0])
+        return {"tem_data": True, "data_fim": fim.isoformat(),
+                "texto_encontrado": trecho.strip(), "confianca": "alta"}
+
+    for p in PALAVRAS_RELATIVAS:
+        if p in t:
+            return {"tem_data": True, "data_fim": None, "texto_encontrado": p, "confianca": "baixa"}
+
+    return {"tem_data": False, "data_fim": None, "texto_encontrado": None, "confianca": "alta"}
+
+
+def _texto_limpo(texto, limite=220):
+    """Junta as linhas lidas pelo OCR sem repetição, pra mostrar no report."""
+    vistas, linhas = set(), []
+    for linha in texto.splitlines():
+        linha = re.sub(r'\s+', ' ', linha).strip()
+        if sum(c.isalnum() for c in linha) < 3:
+            continue
+        chave = linha.lower()
+        if chave in vistas:
+            continue
+        vistas.add(chave)
+        linhas.append(linha)
+    resultado = ' · '.join(linhas)
+    return resultado[:limite] + ('…' if len(resultado) > limite else '')
+
+
+async def ler_data_banner(request, item):
+    """Devolve (situacao, leitura). situacao: 'ok' | 'sem_imagem' | 'falhou'."""
+    src = item.get('img')
+    if not src:
+        return 'sem_imagem', None
+    try:
+        async with SEMAFORO:
+            resp = await request.get(src, timeout=30000)
+            if not resp.ok:
+                return 'falhou', None
+            body = await resp.body()
+        texto = await asyncio.to_thread(ler_texto_ocr, body)
+        leitura = extrair_data(texto)
+        leitura['texto_lido'] = _texto_limpo(texto)
+        if leitura.get('tem_data'):
+            print(f"    📅 {item['href'][:50]} → {leitura}")
+        return 'ok', leitura
+    except Exception as e:
+        print(f"    ⚠ Leitor de data falhou em {src[:60]}: {e}")
+        return 'falhou', None
+
+
+def classificar_data(leitura):
+    """Devolve (status, descricao). status: 'vencido' | 'vencendo' | 'revisar' | None."""
+    try:
+        if not leitura or not leitura.get('tem_data'):
+            return None, ''
+        texto = leitura.get('texto_encontrado') or ''
+        if leitura.get('data_fim'):
+            fim  = date.fromisoformat(leitura['data_fim'])
+            hoje = _hoje()
+            if fim < hoje:
+                dias = (hoje - fim).days
+                return 'vencido', f"Venceu em {fim.strftime('%d/%m')} ({dias} dia(s) atrás) · \"{texto}\""
+            if fim <= hoje + timedelta(days=AVISO_DIAS):
+                return 'vencendo', f"Vence em {fim.strftime('%d/%m')} · \"{texto}\""
+            return None, ''
+        return 'revisar', f"Prazo relativo, conferir manualmente · \"{texto}\""
+    except Exception:
+        return None, ''
 
 
 # ─── Verificação de URL ───────────────────────────────────────────────────────
@@ -208,6 +453,14 @@ async def verificar_site(browser, site):
     )
     page = await context.new_page()
     links = await coletar_links_banners(page, site['url'])
+
+    # NOVO: lê as datas nas imagens antes de fechar o contexto (usa a mesma sessão pra baixar)
+    print(f"  → Lendo datas nas imagens dos banners (OCR)...")
+    leituras = await asyncio.gather(*[ler_data_banner(page.request, item) for item in links])
+    for item, (situacao, leitura) in zip(links, leituras):
+        item['leitura_situacao'] = situacao
+        item['leitura'] = leitura
+
     await context.close()
 
     print(f"  → {len(links)} banners encontrados — verificando em paralelo...")
@@ -216,6 +469,13 @@ async def verificar_site(browser, site):
         print(f"  → Verificando: {item['href'][:70]}")
         resultado = await verificar_url(browser, item['href'], site['url'])
         resultado['section'] = item['section']
+        # NOVO: anexa o resultado da leitura de data
+        resultado['img'] = item.get('img')
+        resultado['leitura_situacao'] = item.get('leitura_situacao', 'falhou')
+        leitura = item.get('leitura') or {}
+        resultado['texto_lido'] = leitura.get('texto_lido', '')
+        resultado['data_fim']   = leitura.get('data_fim')
+        resultado['data_status'], resultado['data_desc'] = classificar_data(item.get('leitura'))
         return resultado
 
     resultados = await asyncio.gather(*[verificar_com_log(item) for item in links])
@@ -230,6 +490,12 @@ def gerar_html_report(todos_resultados, data_hora):
     total_erro = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
     total      = total_ok + total_erro
 
+    # NOVO: contagem de datas
+    total_vencidos = sum(1 for _, res in todos_resultados for r in res if r.get('data_status') == 'vencido')
+    total_vencendo = sum(1 for _, res in todos_resultados for r in res if r.get('data_status') == 'vencendo')
+    total_revisar  = sum(1 for _, res in todos_resultados for r in res if r.get('data_status') == 'revisar')
+    nao_lidos      = [(s, r) for s, res in todos_resultados for r in res if r.get('leitura_situacao') != 'ok']
+
     def secao_badge(sec):
         if sec == 'Categoria':
             return '<span style="background:#EFF6FF;color:#1D4ED8;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;font-family:Montserrat,sans-serif">Categoria</span>'
@@ -239,6 +505,16 @@ def gerar_html_report(todos_resultados, data_hora):
         if ok:
             return f'<span style="background:#F0FDF4;color:#15803D;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">✓ {status}</span>'
         return f'<span style="background:#FEF2F2;color:#DC2626;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">✕ {status}</span>'
+
+    # NOVO: badge de data
+    def data_badge(status):
+        if status == 'vencido':
+            return '<span style="background:#FEF2F2;color:#DC2626;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">✕ VENCIDO</span>'
+        if status == 'vencendo':
+            return '<span style="background:#FFFBEB;color:#B45309;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">⏳ VENCE EM BREVE</span>'
+        return '<span style="background:#F1F5F9;color:#475569;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;font-family:Montserrat,sans-serif">? REVISAR</span>'
+
+    resumo_status = f"{total_erro} link(s) com problema · {total_vencidos} banner(s) vencido(s)"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -261,19 +537,23 @@ def gerar_html_report(todos_resultados, data_hora):
     <!-- Banner de status -->
     <div style="background:#FEF2F2;border:1px solid #FECACA;border-top:none;padding:14px 28px;display:flex;align-items:center;gap:10px">
       <span style="font-size:16px">⚠️</span>
-      <span style="font-size:14px;font-weight:600;color:#DC2626">{total_erro} problema(s) encontrado(s)</span>
-      <span style="margin-left:auto;font-size:13px;color:#64748B;font-weight:500">{total_ok}/{total} banners OK</span>
+      <span style="font-size:14px;font-weight:600;color:#DC2626">{resumo_status}</span>
+      <span style="margin-left:auto;font-size:13px;color:#64748B;font-weight:500">{total_ok}/{total} links OK</span>
     </div>
 
     <!-- Cards de resumo -->
     <div style="display:flex;gap:12px;margin:16px 0">
       <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
         <div style="font-size:32px;font-weight:700;color:#15803D">{total_ok}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">OK</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Links OK</div>
       </div>
       <div style="flex:1;background:white;border:1px solid #FECACA;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
         <div style="font-size:32px;font-weight:700;color:#DC2626">{total_erro}</div>
-        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Com problema</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Links com problema</div>
+      </div>
+      <div style="flex:1;background:white;border:1px solid #FECACA;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+        <div style="font-size:32px;font-weight:700;color:#DC2626">{total_vencidos}</div>
+        <div style="font-size:12px;color:#64748B;font-weight:600;margin-top:2px;text-transform:uppercase;letter-spacing:0.5px">Datas vencidas</div>
       </div>
       <div style="flex:1;background:white;border:1px solid #E2E8F0;border-radius:10px;padding:18px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
         <div style="font-size:32px;font-weight:700;color:#1E293B">{total}</div>
@@ -281,6 +561,119 @@ def gerar_html_report(todos_resultados, data_hora):
       </div>
     </div>
 """
+
+    # ─── NOVO: report completo (todos os banners) — fase de avaliação ───────
+    if REPORT_COMPLETO:
+        def situacao_data(r):
+            sit = r.get('leitura_situacao')
+            if sit == 'sem_imagem':
+                return '<span style="color:#B45309;font-weight:600">Imagem não encontrada</span>'
+            if sit != 'ok':
+                return '<span style="color:#B45309;font-weight:600">Falha na leitura</span>'
+            ds = r.get('data_status')
+            if ds == 'vencido':
+                return f'<span style="color:#DC2626;font-weight:700">{r["data_desc"].split(" · ")[0]}</span>'
+            if ds == 'vencendo':
+                return f'<span style="color:#B45309;font-weight:700">{r["data_desc"].split(" · ")[0]}</span>'
+            if ds == 'revisar':
+                return '<span style="color:#475569;font-weight:600">Prazo relativo (revisar)</span>'
+            if r.get('data_fim'):
+                try:
+                    return f'<span style="color:#15803D;font-weight:600">Válido até {date.fromisoformat(r["data_fim"]).strftime("%d/%m/%Y")}</span>'
+                except Exception:
+                    pass
+            return '<span style="color:#64748B">Sem data</span>'
+
+        def apto(r):
+            if not r['ok'] or r.get('data_status') == 'vencido':
+                return '<span style="background:#FEF2F2;color:#DC2626;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;white-space:nowrap">✕ NÃO APTO</span>'
+            if r.get('data_status') in ('vencendo', 'revisar') or r.get('leitura_situacao') != 'ok':
+                return '<span style="background:#FFFBEB;color:#B45309;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;white-space:nowrap">! CONFERIR</span>'
+            return '<span style="background:#F0FDF4;color:#15803D;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;white-space:nowrap">✓ APTO</span>'
+
+        th = 'padding:10px 12px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9'
+        td = 'padding:12px;vertical-align:top;font-size:12px;border-bottom:1px solid #F1F5F9'
+        for site_nome, resultados in todos_resultados:
+            html += f"""
+    <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+      <div style="padding:14px 20px;border-bottom:1px solid #F1F5F9">
+        <span style="font-size:14px;font-weight:700;color:#1E293B">🧪 Todos os banners — {site_nome} ({len(resultados)})</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse">
+        <tr style="background:#F8FAFC">
+          <th style="{th}">Banner</th>
+          <th style="{th}">Texto lido</th>
+          <th style="{th}">Data</th>
+          <th style="{th}">Link</th>
+          <th style="{th}">Apto?</th>
+        </tr>"""
+            for r in resultados:
+                thumb = (f'<img src="{r["img"]}" style="width:160px;max-height:90px;object-fit:contain;border-radius:6px;display:block;margin-bottom:6px">'
+                         if r.get('img') else '<div style="color:#94A3B8;font-size:11px;margin-bottom:6px">(sem imagem)</div>')
+                texto = r.get('texto_lido') or '<span style="color:#94A3B8">—</span>'
+                link_status = (f'<span style="color:#15803D;font-weight:700">✓ {r["status"]}</span>' if r['ok']
+                               else f'<span style="color:#DC2626;font-weight:700">✕ {r["status"]}</span>')
+                html += f"""
+        <tr>
+          <td style="{td};width:170px">{thumb}{secao_badge(r['section'])}</td>
+          <td style="{td};color:#334155;max-width:220px">{texto}</td>
+          <td style="{td}">{situacao_data(r)}</td>
+          <td style="{td};max-width:200px">{link_status}<br>
+            <a href="{r['url']}" style="color:#007EFF;text-decoration:none;font-family:monospace;font-size:11px;word-break:break-all">{r['url'][:80]}</a></td>
+          <td style="{td}">{apto(r)}</td>
+        </tr>"""
+            html += "\n      </table>\n    </div>"
+
+    # ─── NOVO: aviso de banners que o leitor de datas não conseguiu ler ──────
+    if nao_lidos:
+        itens = "".join(
+            f'<li style="margin:4px 0">{s} · {r["section"]} · '
+            f'{"imagem não encontrada no site" if r.get("leitura_situacao") == "sem_imagem" else "falha ao ler a imagem"} · '
+            f'<a href="{r["url"]}" style="color:#007EFF;text-decoration:none">{r["url"][:60]}</a></li>'
+            for s, r in nao_lidos
+        )
+        html += f"""
+    <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:14px 20px;margin-bottom:16px;font-size:13px">
+      <div style="font-weight:700;color:#B45309;margin-bottom:6px">⚠️ Datas não verificadas em {len(nao_lidos)} banner(s) — conferir manualmente</div>
+      <ul style="margin:0;padding-left:18px;color:#1E293B">{itens}</ul>
+    </div>
+"""
+
+    # ─── NOVO: seção de banners com data ──────────────────────────────────────
+    com_data = [(site_nome, r) for site_nome, res in todos_resultados for r in res if r.get('data_status')]
+    ordem = {'vencido': 0, 'vencendo': 1, 'revisar': 2}
+    com_data.sort(key=lambda x: ordem.get(x[1]['data_status'], 9))
+
+    if com_data:
+        html += f"""
+    <!-- Seção Datas -->
+    <div style="background:white;border:1px solid #E2E8F0;border-radius:10px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">
+      <div style="padding:14px 20px;border-bottom:1px solid #F1F5F9;display:flex;align-items:center;justify-content:space-between">
+        <span style="font-size:14px;font-weight:700;color:#1E293B">📅 Banners com data de validade</span>
+        <span style="font-size:12px;font-weight:600;color:#DC2626;background:#FEF2F2;padding:3px 10px;border-radius:20px">{total_vencidos} vencido(s) · {total_vencendo} vencendo · {total_revisar} revisar</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#F8FAFC">
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Status</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Banner</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Detalhe</th>
+          <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #F1F5F9">Site / Seção</th>
+        </tr>
+"""
+        for site_nome, r in com_data:
+            thumb = f'<img src="{r["img"]}" style="max-width:180px;max-height:80px;border-radius:6px;display:block;margin-bottom:6px">' if r.get('img') else ''
+            html += f"""
+        <tr style="border-bottom:1px solid #F8FAFC">
+          <td style="padding:12px 16px;white-space:nowrap;vertical-align:top">{data_badge(r['data_status'])}</td>
+          <td style="padding:12px 16px;vertical-align:top">
+            {thumb}
+            <a href="{r['url']}" style="color:#007EFF;text-decoration:none;font-family:monospace;font-size:11px">{r['url'][:60]}</a>
+          </td>
+          <td style="padding:12px 16px;color:#1E293B;font-weight:500;font-size:13px;vertical-align:top">{r['data_desc']}</td>
+          <td style="padding:12px 16px;vertical-align:top">{site_nome}<br>{secao_badge(r['section'])}</td>
+        </tr>"""
+
+        html += "\n      </table>\n    </div>"
 
     for site_nome, resultados in todos_resultados:
         erros = [r for r in resultados if not r['ok']]
@@ -329,8 +722,21 @@ def gerar_html_report(todos_resultados, data_hora):
 
 # ─── Envio de e-mail via SendGrid ─────────────────────────────────────────────
 
-def enviar_email(html, data_hora, total_erros):
-    assunto = f"⚠️ ATENÇÃO — {total_erros} banner(s) com problema · Bemol {data_hora}"
+def enviar_email(html, data_hora, total_erros, total_vencidos=0, total_vencendo=0, total_falhas=0, leitor_com_problema=False):
+    # NOVO: assunto reflete também as datas
+    partes = []
+    if total_erros:
+        partes.append(f"{total_erros} link(s) com problema")
+    if total_vencidos:
+        partes.append(f"{total_vencidos} banner(s) vencido(s)")
+    if total_vencendo:
+        partes.append(f"{total_vencendo} vencendo")
+    if total_falhas:
+        partes.append(f"leitor de datas falhou em {total_falhas}")
+    if not partes:
+        partes.append("leitor de datas não encontrou imagens" if leitor_com_problema else "nenhum problema")
+    prefixo = "🧪 REPORT COMPLETO" if REPORT_COMPLETO else "⚠️ ATENÇÃO"
+    assunto = f"{prefixo} — {' · '.join(partes)} · Bemol {data_hora}"
 
     message = Mail(
         from_email=EMAIL_REMETENTE,
@@ -365,23 +771,32 @@ async def main():
 
     total_erros = sum(1 for _, res in todos_resultados for r in res if not r['ok'])
 
+    # NOVO: contagem de datas
+    total_vencidos = sum(1 for _, res in todos_resultados for r in res if r.get('data_status') == 'vencido')
+    total_vencendo = sum(1 for _, res in todos_resultados for r in res if r.get('data_status') == 'vencendo')
+    total_falhas   = sum(1 for _, res in todos_resultados for r in res if r.get('leitura_situacao') == 'falhou')
+    total_banners  = sum(len(res) for _, res in todos_resultados)
+    total_sem_img  = sum(1 for _, res in todos_resultados for r in res if r.get('leitura_situacao') == 'sem_imagem')
+    # Se nenhum banner teve imagem encontrada, algo mudou no site: também avisa
+    leitor_com_problema = total_falhas > 0 or (total_banners > 0 and total_sem_img == total_banners)
+
     html = gerar_html_report(todos_resultados, data_hora)
 
     with open("report_banners.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("📄 Relatório salvo em report_banners.html")
 
-    if total_erros > 0:
-        print(f"⚠️  {total_erros} problema(s) encontrado(s) — enviando e-mail...")
+    if REPORT_COMPLETO or total_erros > 0 or total_vencidos > 0 or total_vencendo > 0 or leitor_com_problema:
+        print(f"⚠️  {total_erros} link(s) com problema · {total_vencidos} vencido(s) · {total_vencendo} vencendo · {total_falhas} falha(s) de leitura — enviando e-mail...")
         if SENDGRID_API_KEY:
-            enviar_email(html, data_hora, total_erros)
+            enviar_email(html, data_hora, total_erros, total_vencidos, total_vencendo, total_falhas, leitor_com_problema)
         else:
             print("⚠️  Variável SENDGRID_API_KEY não configurada")
     else:
         print("✅ Tudo OK — nenhum e-mail enviado.")
 
     print(f"\n{'='*50}")
-    print(f"Total com problema: {total_erros}")
+    print(f"Total com problema: {total_erros} links · {total_vencidos} datas vencidas")
     print(f"{'='*50}\n")
 
 
