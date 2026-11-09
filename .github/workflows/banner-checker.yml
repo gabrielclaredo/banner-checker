@@ -2,11 +2,16 @@ name: Banner Checker — Bemol
 
 on:
   workflow_dispatch:
+    inputs:
+      data_simulada:
+        description: 'SÓ PARA TESTE: fingir que hoje é esta data (ex.: 2026-12-31). Deixe vazio para uso normal.'
+        required: false
+        default: ''
 
 jobs:
   check-banners:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -31,8 +36,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-1.49.0
 
+      - name: Instalar leitor de texto (OCR)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-por
+
       - name: Instalar dependências Python
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytesseract pillow
 
       - name: Instalar Chromium e dependências do sistema
         run: |
@@ -42,6 +52,7 @@ jobs:
       - name: Rodar verificação
         env:
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          DATA_SIMULADA: ${{ inputs.data_simulada }}
         run: python checker.py
 
       - name: Salvar relatório como artefato
