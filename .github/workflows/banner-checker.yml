@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       data_simulada:
-        description: 'Insira data para teste. Deixe vazio para data automática.'
+        description: 'SÓ PARA TESTE: fingir que hoje é esta data (ex.: 2026-12-31). Deixe vazio para uso normal.'
         required: false
         default: ''
 
@@ -36,18 +36,32 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-1.49.0
 
+      - name: Cache do leitor de texto (OCR)
+        uses: actions/cache@v4
+        with:
+          path: ~/ocr-debs
+          key: ocr-debs-ubuntu-24.04-v1
+
       - name: Instalar leitor de texto (OCR)
         continue-on-error: true
         timeout-minutes: 6
         run: |
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          # 1) Usa a cópia guardada, se existir (não depende do servidor do Ubuntu)
+          if ls ~/ocr-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/ocr-debs/*.deb; then
+            echo "OCR instalado a partir da cópia guardada."
+            exit 0
+          fi
+          # 2) Senão, baixa (até 3 tentativas) e guarda uma cópia pras próximas vezes
           for tentativa in 1 2 3; do
-            echo "Tentativa $tentativa de instalar o OCR..."
-            if sudo apt-get update -qq -o Acquire::Retries=3 && \
-               sudo apt-get install -y -qq -o Acquire::Retries=3 tesseract-ocr tesseract-ocr-por; then
-              echo "OCR instalado."
-              exit 0
+            echo "Tentativa $tentativa de baixar o OCR..."
+            if sudo apt-get update -qq $APT && \
+               sudo apt-get install -y -qq --download-only $APT tesseract-ocr tesseract-ocr-por; then
+              mkdir -p ~/ocr-debs
+              cp /var/cache/apt/archives/*.deb ~/ocr-debs/
+              sudo dpkg -i ~/ocr-debs/*.deb && echo "OCR instalado." && exit 0
             fi
-            sleep 20
+            sleep 15
           done
           echo "::warning::Não foi possível instalar o OCR. A checagem de links segue; o e-mail vai avisar que o leitor de datas falhou."
           exit 1
@@ -55,10 +69,13 @@ jobs:
       - name: Instalar dependências Python
         run: pip install -r requirements.txt pytesseract pillow
 
-      - name: Instalar Chromium e dependências do sistema
-        run: |
-          playwright install chromium
-          playwright install-deps chromium
+      - name: Instalar Chromium
+        run: playwright install chromium
+
+      - name: Instalar dependências do sistema do Chromium
+        continue-on-error: true
+        timeout-minutes: 6
+        run: playwright install-deps chromium
 
       - name: Rodar verificação
         env:
