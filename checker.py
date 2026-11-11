@@ -368,6 +368,8 @@ def decidir_data(textos):
     resultados = [extrair_data(t) for t in textos]
     votos = Counter(r['data_fim'] for r in resultados if r.get('data_fim'))
     votos = _juntar_digito_perdido(votos)
+    # Data lida em uma única leitura é quase sempre ruído (número de produto lido torto)
+    votos = Counter({d: v for d, v in votos.items() if v >= 2})
     if votos:
         mais_votos = max(votos.values())
         escolhida = max(d for d, v in votos.items() if v == mais_votos)
@@ -382,7 +384,7 @@ def decidir_data(textos):
                         "votos": f"{votos[escolhida]} x {validas[alternativa]}"}
         r = next(r for r in resultados if r.get('data_fim') == escolhida)
         return dict(r, votos=f"{votos[escolhida]}/{len(textos)}")
-    relativos = [r for r in resultados if r.get('tem_data')]
+    relativos = [r for r in resultados if r.get('tem_data') and not r.get('data_fim')]
     if relativos:
         return relativos[0]
     return {"tem_data": False, "data_fim": None, "texto_encontrado": None, "confianca": "alta"}
@@ -458,9 +460,12 @@ def extrair_data(texto_bruto):
             continue
         if _eh_data_de_inicio(t, m.start(), m.end()):
             continue
-        # Exige alguma pista de que é data (evita "10/12" de preço solto)
-        contexto = t[max(0, m.start() - 25):m.end() + 5]
-        if not re.search(r'ate|valid|de |a |promo|oferta|dia|/\d{2,4}', contexto):
+        # Exige pista FORTE de que é data (evita "75\"" virar "7/05", números de produto etc.)
+        antes = t[max(0, m.start() - 30):m.start()]
+        tem_ano = bool(m.group(3))
+        palavra_de_data = re.search(r'\b(ate|valid\w*|vigen\w*|promoc\w*|oferta\w*|periodo|termin\w*|encerr\w*|acaba\w*)\b', antes)
+        fim_de_intervalo = re.search(r'\d{1,2}(?:\s*/\s*\d{1,2})?\s*(?:a|ate|-|–|e)\s*$', antes)
+        if not (tem_ano or palavra_de_data or fim_de_intervalo):
             continue
         ano = _ano_para(dia, mes, m.group(3), hoje)
         if ano:
