@@ -15,8 +15,20 @@ import unicodedata
 from datetime import date, timedelta
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")   # tesseract com 1 thread: evita lentidão em paralelo
 from collections import Counter
+import threading
+import urllib.request
 from PIL import Image, ImageOps, ImageFilter
-import pytesseract
+
+# Leitor de texto: usa a versão embutida no pacote Python "tesserocr" (não depende do
+# servidor de programas do Ubuntu). Se não estiver disponível, usa o tesseract do sistema.
+try:
+    import tesserocr
+except Exception:
+    tesserocr = None
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
 # ─── Configuração ────────────────────────────────────────────────────────────
 EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
@@ -248,8 +260,44 @@ def _abrir_cinza(img_bytes, largura=LARGURA_LEITURA):
     return ImageOps.grayscale(img)
 
 
+TESSDATA_DIR = os.path.expanduser(os.environ.get("TESSDATA_DIR", "~/tessdata"))
+TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata"
+_tessdata_lock = threading.Lock()
+_tess_local = threading.local()
+
+
+def _garantir_tessdata():
+    """Baixa o dicionário de português do leitor (2 MB, do GitHub) se ainda não existir."""
+    arquivo = os.path.join(TESSDATA_DIR, "por.traineddata")
+    with _tessdata_lock:
+        if os.path.exists(arquivo) and os.path.getsize(arquivo) > 1_000_000:
+            return TESSDATA_DIR
+        os.makedirs(TESSDATA_DIR, exist_ok=True)
+        temp = arquivo + ".tmp"
+        with urllib.request.urlopen(TESSDATA_URL, timeout=60) as r, open(temp, "wb") as f:
+            f.write(r.read())
+        os.replace(temp, arquivo)
+    return TESSDATA_DIR
+
+
+def _api_tesserocr(psm):
+    """Um leitor por thread e por modo (criar um novo a cada imagem é lento)."""
+    apis = getattr(_tess_local, "apis", None)
+    if apis is None:
+        apis = _tess_local.apis = {}
+    if psm not in apis:
+        apis[psm] = tesserocr.PyTessBaseAPI(path=_garantir_tessdata(), lang='por', psm=psm)
+    return apis[psm]
+
+
 def _ocr(imagem, psm):
-    return pytesseract.image_to_string(imagem, lang='por', config=f'--psm {psm}', timeout=OCR_TIMEOUT)
+    if tesserocr is not None:
+        api = _api_tesserocr(psm)
+        api.SetImage(imagem)
+        return api.GetUTF8Text()
+    if pytesseract is not None:
+        return pytesseract.image_to_string(imagem, lang='por', config=f'--psm {psm}', timeout=OCR_TIMEOUT)
+    raise RuntimeError("leitor de texto não instalado")
 
 
 def _faixas(cinza, n=4, ampliar=1.0):
