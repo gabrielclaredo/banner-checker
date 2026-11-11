@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       data_simulada:
-        description: 'SÓ PARA TESTE: fingir que hoje é esta data (ex.: 2026-12-31). Deixe vazio para uso normal.'
+        description: 'Insira data para teste. Deixe vazio para data automática.'
         required: false
         default: ''
 
 jobs:
   check-banners:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
 
     steps:
@@ -37,9 +37,20 @@ jobs:
           key: ${{ runner.os }}-playwright-chromium-1.49.0
 
       - name: Instalar leitor de texto (OCR)
+        continue-on-error: true
+        timeout-minutes: 6
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-por
+          for tentativa in 1 2 3; do
+            echo "Tentativa $tentativa de instalar o OCR..."
+            if sudo apt-get update -qq -o Acquire::Retries=3 && \
+               sudo apt-get install -y -qq -o Acquire::Retries=3 tesseract-ocr tesseract-ocr-por; then
+              echo "OCR instalado."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::warning::Não foi possível instalar o OCR. A checagem de links segue; o e-mail vai avisar que o leitor de datas falhou."
+          exit 1
 
       - name: Instalar dependências Python
         run: pip install -r requirements.txt pytesseract pillow
