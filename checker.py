@@ -19,7 +19,7 @@ from PIL import Image, ImageOps, ImageFilter
 import pytesseract
 
 # ─── Configuração ────────────────────────────────────────────────────────────
-EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br", "marketingbol@bemol.com.br"]
+EMAIL_DESTINO    = ["gabriellaredo@bemol.com.br"]
 EMAIL_REMETENTE  = "gabriellaredo@bemol.com.br"
 SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
 
@@ -28,7 +28,7 @@ AVISO_DIAS = 2   # avisa quando faltam até X dias pro banner vencer
 
 # REPORT_COMPLETO = True  → e-mail chega SEMPRE, listando todos os banners (fase de avaliação)
 # REPORT_COMPLETO = False → e-mail chega só quando houver problema
-REPORT_COMPLETO = False
+REPORT_COMPLETO = True
 
 SITES = [
     {"nome": "Bemol",       "url": "https://www.bemol.com.br"},
