@@ -36,45 +36,31 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-1.49.0
 
-      - name: Cache do leitor de texto (OCR)
+      - name: Cache do dicionário do leitor
         uses: actions/cache@v4
         with:
-          path: ~/ocr-debs
-          key: ocr-debs-ubuntu-24.04-v1
+          path: ~/tessdata
+          key: tessdata-por-v1
 
-      - name: Instalar leitor de texto (OCR)
+      - name: Instalar dependências Python (inclui o leitor de texto)
+        run: pip install -r requirements.txt tesserocr pillow
+
+      - name: Baixar dicionário de português do leitor
         continue-on-error: true
-        timeout-minutes: 6
         run: |
-          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
-          # 1) Usa a cópia guardada, se existir (não depende do servidor do Ubuntu)
-          if ls ~/ocr-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/ocr-debs/*.deb; then
-            echo "OCR instalado a partir da cópia guardada."
-            exit 0
+          mkdir -p ~/tessdata
+          if [ ! -s ~/tessdata/por.traineddata ]; then
+            curl -fsSL --retry 3 --max-time 60 -o ~/tessdata/por.traineddata \
+              https://github.com/tesseract-ocr/tessdata_fast/raw/main/por.traineddata
           fi
-          # 2) Senão, baixa (até 3 tentativas) e guarda uma cópia pras próximas vezes
-          for tentativa in 1 2 3; do
-            echo "Tentativa $tentativa de baixar o OCR..."
-            if sudo apt-get update -qq $APT && \
-               sudo apt-get install -y -qq --download-only $APT tesseract-ocr tesseract-ocr-por; then
-              mkdir -p ~/ocr-debs
-              cp /var/cache/apt/archives/*.deb ~/ocr-debs/
-              sudo dpkg -i ~/ocr-debs/*.deb && echo "OCR instalado." && exit 0
-            fi
-            sleep 15
-          done
-          echo "::warning::Não foi possível instalar o OCR. A checagem de links segue; o e-mail vai avisar que o leitor de datas falhou."
-          exit 1
-
-      - name: Instalar dependências Python
-        run: pip install -r requirements.txt pytesseract pillow
+          ls -la ~/tessdata
 
       - name: Instalar Chromium
         run: playwright install chromium
 
       - name: Instalar dependências do sistema do Chromium
         continue-on-error: true
-        timeout-minutes: 6
+        timeout-minutes: 4
         run: playwright install-deps chromium
 
       - name: Rodar verificação
