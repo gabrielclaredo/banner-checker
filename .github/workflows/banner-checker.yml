@@ -42,6 +42,14 @@ jobs:
           path: ~/tessdata
           key: tessdata-por-v1
 
+      - name: Recuperar histórico de banners (dias no ar)
+        uses: actions/cache/restore@v4
+        with:
+          path: historico_banners.json
+          key: historico-banners-${{ github.run_id }}
+          restore-keys: |
+            historico-banners-
+
       - name: Instalar dependências Python (inclui o leitor de texto)
         run: pip install -r requirements.txt tesserocr pillow
 
@@ -69,10 +77,19 @@ jobs:
           DATA_SIMULADA: ${{ inputs.data_simulada }}
         run: python checker.py
 
+      - name: Guardar histórico de banners (dias no ar)
+        if: always() && hashFiles('historico_banners.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: historico_banners.json
+          key: historico-banners-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Salvar relatório como artefato
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: report-banners-${{ github.run_number }}
-          path: report_banners.html
+          path: |
+            report_banners.html
+            historico_banners.json
           retention-days: 30
