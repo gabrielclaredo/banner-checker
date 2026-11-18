@@ -1,10 +1,10 @@
-name: Banner Checker — Bemol
+name: Banner Checker - Bemol
 
 on:
   workflow_dispatch:
     inputs:
       data_simulada:
-        description: 'SÓ PARA TESTE: fingir que hoje é esta data (ex.: 2026-12-31). Deixe vazio para uso normal.'
+        description: 'SOMENTE PARA TESTE: data no formato AAAA-MM-DD. Deixe vazio para uso normal.'
         required: false
         default: ''
 
@@ -30,19 +30,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Cache Playwright (Chromium)
+      - name: Cache Playwright Chromium
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-chromium-1.49.0
 
-      - name: Cache do dicionário do leitor
+      - name: Cache do dicionario do leitor
         uses: actions/cache@v4
         with:
           path: ~/tessdata
           key: tessdata-por-v1
 
-      - name: Recuperar histórico de banners (dias no ar)
+      - name: Recuperar historico de banners
         uses: actions/cache/restore@v4
         with:
           path: historico_banners.json
@@ -50,10 +50,10 @@ jobs:
           restore-keys: |
             historico-banners-
 
-      - name: Instalar dependências Python (inclui o leitor de texto)
+      - name: Instalar dependencias Python
         run: pip install -r requirements.txt tesserocr pillow
 
-      - name: Baixar dicionário de português do leitor
+      - name: Baixar dicionario de portugues
         continue-on-error: true
         run: |
           mkdir -p ~/tessdata
@@ -66,25 +66,25 @@ jobs:
       - name: Instalar Chromium
         run: playwright install chromium
 
-      - name: Instalar dependências do sistema do Chromium
+      - name: Instalar dependencias do sistema do Chromium
         continue-on-error: true
         timeout-minutes: 4
         run: playwright install-deps chromium
 
-      - name: Rodar verificação
+      - name: Rodar verificacao
         env:
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           DATA_SIMULADA: ${{ inputs.data_simulada }}
         run: python checker.py
 
-      - name: Guardar histórico de banners (dias no ar)
+      - name: Guardar historico de banners
         if: always() && hashFiles('historico_banners.json') != ''
         uses: actions/cache/save@v4
         with:
           path: historico_banners.json
           key: historico-banners-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Salvar relatório como artefato
+      - name: Salvar relatorio como artefato
         if: always()
         uses: actions/upload-artifact@v4
         with:
