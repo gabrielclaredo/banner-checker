@@ -484,7 +484,7 @@ def atualizar_historico(todos_resultados):
                 pass
             if resultado.get("section") == "Carrossel 2" and dias > LIMITE_DIAS_CARROSSEL_2 and not data_ativa:
                 resultado["tempo_status"] = "antigo"
-                resultado["tempo_desc"] = f"No ar ha {dias} dias sem data ativa"
+                resultado["tempo_desc"] = f"No ar há {dias} dias sem data ativa"
             atual[chave] = {"primeira_vez": primeira.isoformat(), "ultima_vez": hoje.isoformat(), "dias_no_ar": dias}
 
     temporario = HISTORICO_ARQUIVO + ".tmp"
@@ -496,8 +496,6 @@ def atualizar_historico(todos_resultados):
 def gerar_html_report(todos_resultados, data_hora):
     todos = [(site, item) for site, resultados in todos_resultados for item in resultados]
     total = len(todos)
-    ok = sum(item["ok"] for _, item in todos)
-    erros = total - ok
     vencidos = sum(item.get("data_status") == "vencido" for _, item in todos)
     vencendo = sum(item.get("data_status") == "vencendo" for _, item in todos)
     antigos = sum(item.get("tempo_status") == "antigo" for _, item in todos)
@@ -506,47 +504,158 @@ def gerar_html_report(todos_resultados, data_hora):
     def e(valor):
         return html.escape(str(valor or ""), quote=True)
 
-    linhas = []
-    for site, item in todos:
+    def classificacao(item):
         if not item["ok"] or item.get("data_status") == "vencido" or item.get("tempo_status") == "antigo":
-            apto, cor = "NAO APTO", "#DC2626"
-        elif item.get("data_status") in ("vencendo", "revisar") or item.get("leitura_situacao") != "ok":
-            apto, cor = "CONFERIR", "#B45309"
-        else:
-            apto, cor = "APTO", "#15803D"
-        if item.get("tempo_status") == "antigo":
-            data_info = item["tempo_desc"]
-        elif item.get("data_status"):
-            data_info = item.get("data_desc")
-        elif item.get("data_fim"):
-            data_info = f"Valido ate {date.fromisoformat(item['data_fim']).strftime('%d/%m/%Y')}"
-        elif item.get("leitura_situacao") != "ok":
-            data_info = item.get("motivo_falha") or "Data nao verificada"
-        else:
-            data_info = "Sem data"
-        miniatura = f'<img src="{e(item.get("img"))}" style="width:150px;max-height:80px;object-fit:contain">' if item.get("img") else "(sem imagem)"
-        linhas.append(f"""
-        <tr>
-          <td>{miniatura}<br><small>{e(site)} / {e(item['section'])}</small></td>
-          <td>{e(item.get('data_trecho')) or '-'}</td>
-          <td>{e(data_info)}</td>
-          <td><b>{e(item['status'])}</b><br><a href="{e(item['url'])}">{e(item['url'])}</a></td>
-          <td style="color:{cor};font-weight:700">{apto}</td>
-        </tr>""")
+            return "problema"
+        if item.get("data_status") in ("vencendo", "revisar") or item.get("leitura_situacao") != "ok":
+            return "conferir"
+        return "ok"
 
-    resumo = f"{erros} link(s) com problema; {vencidos} vencido(s); {vencendo} vencendo; {antigos} antigo(s); {revisar} para revisar"
+    total_ok = sum(classificacao(item) == "ok" for _, item in todos)
+    total_problemas = sum(classificacao(item) == "problema" for _, item in todos)
+    total_conferir = sum(classificacao(item) == "conferir" for _, item in todos)
+    links_com_erro = sum(not item["ok"] for _, item in todos)
+
+    if total_problemas:
+        status_fundo, status_borda, status_cor, status_icone = "#FFF1F2", "#FECDD3", "#BE123C", "⚠️"
+        partes = []
+        if links_com_erro:
+            partes.append(f"{links_com_erro} link(s) com problema")
+        if vencidos:
+            partes.append(f"{vencidos} banner(s) vencido(s)")
+        if antigos:
+            partes.append(f"{antigos} banner(s) antigo(s) sem data ativa")
+        status_texto = " · ".join(partes)
+    elif total_conferir:
+        status_fundo, status_borda, status_cor, status_icone = "#FFFBEB", "#FDE68A", "#A16207", "🔎"
+        status_texto = f"{total_conferir} banner(s) precisam de conferência"
+    else:
+        status_fundo, status_borda, status_cor, status_icone = "#F0FDF4", "#BBF7D0", "#15803D", "✅"
+        status_texto = "Tudo certo: nenhum link com problema e nenhum banner vencido"
+
+    def card(valor, rotulo, cor):
+        return f"""
+        <td class="summary-cell" style="width:25%;padding:0 5px">
+          <div style="background:#FFFFFF;border:1px solid #DCE3EC;border-radius:11px;padding:19px 10px;text-align:center;box-shadow:0 1px 3px rgba(71,85,105,.06)">
+            <div style="font-size:30px;line-height:34px;font-weight:700;color:{cor}">{valor}</div>
+            <div style="margin-top:4px;font-size:11px;line-height:16px;font-weight:700;letter-spacing:.45px;text-transform:uppercase;color:#64748B">{rotulo}</div>
+          </div>
+        </td>"""
+
+    def data_info(item):
+        if item.get("tempo_status") == "antigo":
+            return item["tempo_desc"], "#BE123C"
+        if item.get("data_status") == "vencido":
+            return item.get("data_desc") or "Data vencida", "#BE123C"
+        if item.get("data_status") in ("vencendo", "revisar"):
+            return item.get("data_desc") or "Conferir data", "#A16207"
+        if item.get("data_fim"):
+            valor = date.fromisoformat(item["data_fim"]).strftime("%d/%m/%Y")
+            return f"Válido até {valor}", "#15803D"
+        if item.get("leitura_situacao") != "ok":
+            return item.get("motivo_falha") or "Data não verificada", "#64748B"
+        return "Sem data", "#64748B"
+
+    secoes = []
+    for site, resultados in todos_resultados:
+        linhas = []
+        for item in resultados:
+            classe = classificacao(item)
+            if classe == "problema":
+                apto, apto_cor, apto_fundo, apto_icone = "NÃO APTO", "#BE123C", "#FFF1F2", "✕"
+            elif classe == "conferir":
+                apto, apto_cor, apto_fundo, apto_icone = "CONFERIR", "#A16207", "#FFFBEB", "!"
+            else:
+                apto, apto_cor, apto_fundo, apto_icone = "APTO", "#15803D", "#F0FDF4", "✓"
+
+            descricao_data, cor_data = data_info(item)
+            if item.get("img"):
+                miniatura = f'<img src="{e(item["img"])}" alt="Banner" style="display:block;width:160px;max-width:100%;height:76px;object-fit:contain;border-radius:7px;background:#F8FAFC">'
+            else:
+                miniatura = '<div style="width:160px;max-width:100%;height:54px;border-radius:7px;background:#F1F5F9;color:#94A3B8;text-align:center;line-height:54px;font-size:11px">Sem imagem</div>'
+
+            secao_cor = "#15803D" if item.get("section") != "Categoria" else "#2563EB"
+            secao_fundo = "#F0FDF4" if item.get("section") != "Categoria" else "#EFF6FF"
+            link_cor = "#15803D" if item["ok"] else "#BE123C"
+            link_icone = "✓" if item["ok"] else "✕"
+            texto_lido = e(item.get("data_trecho")) or '<span style="color:#94A3B8">—</span>'
+
+            linhas.append(f"""
+              <tr>
+                <td class="banner-cell" style="padding:12px 13px;border-bottom:1px solid #EEF2F7;vertical-align:top">
+                  {miniatura}
+                  <span style="display:inline-block;margin-top:7px;padding:3px 9px;border-radius:999px;background:{secao_fundo};color:{secao_cor};font-size:10px;font-weight:700">{e(item['section'])}</span>
+                </td>
+                <td style="padding:14px 13px;border-bottom:1px solid #EEF2F7;vertical-align:top;color:#475569;font-size:12px;line-height:18px">{texto_lido}</td>
+                <td style="padding:14px 13px;border-bottom:1px solid #EEF2F7;vertical-align:top;color:{cor_data};font-size:12px;line-height:18px;font-weight:{'700' if cor_data != '#64748B' else '500'}">{e(descricao_data)}</td>
+                <td style="padding:14px 13px;border-bottom:1px solid #EEF2F7;vertical-align:top;font-size:12px;line-height:17px">
+                  <div style="color:{link_cor};font-weight:700">{link_icone} {e(item['status'])}</div>
+                  <a href="{e(item['url'])}" style="display:block;margin-top:3px;color:#087EF5;text-decoration:none;word-break:break-all">{e(item['url'])}</a>
+                </td>
+                <td style="padding:14px 13px;border-bottom:1px solid #EEF2F7;vertical-align:top;white-space:nowrap">
+                  <span style="display:inline-block;padding:5px 10px;border-radius:7px;background:{apto_fundo};color:{apto_cor};font-size:11px;font-weight:700">{apto_icone} {apto}</span>
+                </td>
+              </tr>""")
+
+        secoes.append(f"""
+          <div style="margin-top:16px;background:#FFFFFF;border:1px solid #DCE3EC;border-radius:11px;overflow:hidden;box-shadow:0 1px 3px rgba(71,85,105,.05)">
+            <div style="padding:16px 20px;border-bottom:1px solid #E8EDF3;color:#27364A;font-size:14px;font-weight:700">🧪 Todos os banners — {e(site)} <span style="color:#64748B;font-weight:600">({len(resultados)})</span></div>
+            <div class="table-wrap" style="overflow-x:auto">
+              <table role="presentation" style="width:100%;min-width:780px;border-collapse:collapse">
+                <thead><tr style="background:#F7F9FC">
+                  <th>Banner</th><th>Data lida</th><th>Data</th><th>Link</th><th>Apto?</th>
+                </tr></thead>
+                <tbody>{''.join(linhas)}</tbody>
+              </table>
+            </div>
+          </div>""")
+
+    data_exibicao = e(data_hora).replace(" as ", " &agrave;s ")
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Report de Banners</title></head>
-<body style="font-family:Arial,sans-serif;background:#F8FAFC;color:#1E293B;padding:24px">
-<div style="max-width:1000px;margin:auto;background:white;border-radius:12px;overflow:hidden">
-  <header style="background:#007EFF;color:white;padding:24px"><h1 style="margin:0">Report de Banners - Bemol</h1><p>{e(data_hora)}</p></header>
-  <section style="padding:18px;background:#EFF6FF"><b>{e(resumo)}</b><span style="float:right">{ok}/{total} links OK</span></section>
-  <table style="width:100%;border-collapse:collapse">
-    <thead><tr style="background:#F1F5F9"><th>Banner</th><th>Data lida</th><th>Situacao</th><th>Link</th><th>Apto?</th></tr></thead>
-    <tbody>{''.join(linhas)}</tbody>
-  </table>
-</div>
-<style>th,td{{padding:12px;text-align:left;border-bottom:1px solid #E2E8F0;vertical-align:top;font-size:12px}}a{{color:#007EFF;word-break:break-all}}</style>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Report de Banners — Bemol</title>
+  <style>
+    body {{ margin:0; padding:24px 12px; background:#F4F7FA; color:#334155; font-family:Arial,Helvetica,sans-serif; }}
+    th {{ padding:11px 13px; text-align:left; border-bottom:1px solid #E3E9F0; color:#64748B; font-size:10px; line-height:14px; font-weight:700; letter-spacing:.55px; text-transform:uppercase; }}
+    @media only screen and (max-width:640px) {{
+      body {{ padding:0; }}
+      .container {{ border-radius:0 !important; }}
+      .header {{ padding:22px 18px !important; }}
+      .status-count {{ display:block !important; margin:8px 0 0 !important; }}
+      .summary-cell {{ display:block !important; width:auto !important; padding:5px 0 !important; }}
+      .summary-table, .summary-row {{ display:block !important; width:100% !important; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="container" style="max-width:1000px;margin:0 auto">
+    <div style="border-radius:12px 12px 0 0;overflow:hidden">
+      <div class="header" style="background:#087EF5;padding:25px 28px;color:#FFFFFF">
+        <div style="font-size:18px;line-height:24px;font-weight:700">📋 Report de Banners — Bemol</div>
+        <div style="margin-top:4px;color:#DCEEFF;font-size:12px;line-height:18px;font-weight:500">{data_exibicao}</div>
+      </div>
+      <div style="padding:14px 28px;background:{status_fundo};border:1px solid {status_borda};border-top:0;color:{status_cor};font-size:13px;line-height:20px">
+        <strong>{status_icone} {e(status_texto)}</strong>
+        <span class="status-count" style="float:right;margin-left:20px;color:#64748B;font-weight:500">{total_ok}/{total} banners OK</span>
+      </div>
+    </div>
+
+    <table class="summary-table" role="presentation" style="width:100%;border-collapse:separate;border-spacing:0;margin:11px -5px 0;width:calc(100% + 10px)">
+      <tr class="summary-row">
+        {card(total, 'Banners analisados', '#334155')}
+        {card(total_ok, 'Banners OK', '#15803D')}
+        {card(total_problemas, 'Com problema', '#BE123C' if total_problemas else '#334155')}
+        {card(total_conferir, 'Para conferir', '#A16207' if total_conferir else '#334155')}
+      </tr>
+    </table>
+
+    {''.join(secoes)}
+
+    <div style="padding:22px 10px 8px;text-align:center;color:#94A3B8;font-size:11px;line-height:17px">Gerado automaticamente · Bemol Banner Checker</div>
+  </div>
 </body></html>"""
 
 
